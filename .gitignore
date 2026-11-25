@@ -1,0 +1,3 @@
+# Personal Claude Code settings, and the worktrees that the Claude desktop app creates here
+.claude/settings.local.json
+.claude/worktrees/

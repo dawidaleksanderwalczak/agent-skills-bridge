@@ -1,0 +1,3 @@
+# Keeps .claude/skills in every checkout, so Claude Code watches it from the first session.
+# .claude/hooks/agent-skills-bridge.sh copies .agents/skills here. Each copy has its own
+# .gitignore, so git never sees the copies. Commit this file; edit skills in .agents/skills.

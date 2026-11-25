@@ -1,0 +1,49 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "set \\' ; ASB_CMD=session . \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.sh\" ; exit ; #' ; & \"$env:CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.ps1\" session ; exit $LASTEXITCODE",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "FileChanged": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "set \\' ; ASB_CMD=sync . \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.sh\" ; exit ; #' ; & \"$env:CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.ps1\" sync ; exit $LASTEXITCODE",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Edit(**/.claude/skills/**)",
+            "command": "set \\' ; ASB_CMD=guard . \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.sh\" ; exit ; #' ; & \"$env:CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.ps1\" guard ; exit $LASTEXITCODE",
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "set \\' ; ASB_CMD=guard . \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.sh\" ; exit ; #' ; & \"$env:CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.ps1\" guard ; exit $LASTEXITCODE",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

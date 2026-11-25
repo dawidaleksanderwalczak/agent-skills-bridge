@@ -1,0 +1,469 @@
+# Agent Skills Bridge: sharing `.agents/skills` with Claude Code
+
+## 1. Summary
+
+Each repository should have one set of project-specific Agent Skills that every AI coding tool on
+every developer machine can use. The tool-neutral place for them is `.agents/skills/<name>/SKILL.md`.
+Codex, GitHub Copilot, Cursor, JetBrains Junie and OpenCode read that folder directly. **Claude Code
+does not.** It loads project skills only from `.claude/skills`. That was checked in the Claude Code
+2.1.330 program, and no release note up to 2.1.332 changes it. The feature request,
+[anthropics/claude-code#31005](https://github.com/anthropics/claude-code/issues/31005), is still
+open.
+
+The **Agent Skills Bridge** closes the gap from inside Claude Code. Three hooks, committed in
+`.claude/settings.json`, do the work:
+
+- they copy every skill from `.agents/skills` to `.claude/skills` as read-only copies that version
+  control ignores;
+- they keep those copies in sync while people work;
+- they stop Claude from editing a copy by mistake.
+
+Developers install nothing and run nothing. A POSIX shell script and a PowerShell twin cover Windows,
+macOS and Linux, in git and in svn. The kit works next to an existing `.claude` folder: its own
+settings, hooks and Claude-only skills stay as they are.
+
+**Verification:**
+- The automated tests pass on these platforms:
+  - Windows 11: Git Bash, and Windows PowerShell 5.1.
+  - Ubuntu 24.04: dash, bash and zsh, each used as `sh`.
+  - Alpine: BusyBox.
+- The tests include git and svn repositories that already have a `.claude` folder.
+- The hooks were observed working in live Claude Code 2.1.330 sessions.
+- A check from cmd.exe confirmed that Claude Code never runs hooks in cmd, and that the kit works for
+  people who work in cmd.
+
+---
+
+## 2. Problem and requirements
+
+### Which tool reads which folder (November 2026)
+
+| Tool | Reads `.agents/skills` | Reads `.claude/skills` |
+|---|---|---|
+| **Claude Code** (CLI, desktop, IDE) | **no** | yes: its only project location |
+| OpenAI Codex (CLI, IDE) | yes | no |
+| GitHub Copilot (CLI, VS Code, cloud agent) | yes | yes; for the same name, `.agents` wins |
+| Cursor (IDE, `cursor-agent`) | yes | yes; both copies are listed |
+| JetBrains Junie | yes | no |
+| OpenCode | yes | yes; 2.x prefers `.agents`, 1.x lists both with a warning |
+
+### Requirements
+
+- **One source of truth.** Skills live in the repository and are reviewed like code.
+- **Every environment.** Windows, macOS and Linux; git and svn; Claude Code in the desktop app and
+  in a terminal, whichever shell that terminal runs (cmd, PowerShell, Git Bash, zsh and so on).
+- **Fits existing repositories.** It works next to an existing `.claude` folder with its own
+  settings, hooks, ignore rules and Claude-only skills.
+- **No setup per person.** Nothing to install or remember, not even after a pull or update.
+- **No fragile mechanisms.** No symlinks (they need privileges on Windows and break in version
+  control), and no generated files in version control.
+- **Safe.** It never overwrites or deletes someone's work, and a failure never blocks a session or an
+  edit.
+- **Cheap.** It can run at every session start, including on Windows machines whose security software
+  makes every process start slow.
+- **Removable.** Easy to take out once Claude Code reads `.agents/skills` itself.
+
+---
+
+## 3. Solution at a glance
+
+```mermaid
+flowchart LR
+    subgraph repo["Repository, git or svn"]
+        SRC[".agents/skills/skill-name/<br/>source of truth, committed"]
+        CFG[".claude/settings.json<br/>3 hooks, committed"]
+        SCR[".claude/hooks/agent-skills-bridge.sh / .ps1"]
+        DST[".claude/skills/skill-name/<br/>generated copy, read-only, ignores itself"]
+    end
+    OTHERS["Codex, Copilot, Cursor,<br/>Junie, OpenCode"] -->|read directly| SRC
+    CC["Claude Code"] -->|runs hooks from| CFG
+    CFG --> SCR
+    SCR -->|copies at session start and on every change| DST
+    SCR -.->|reads| SRC
+    CC -->|loads skills from| DST
+```
+
+- **Source.** People edit skills only in `.agents/skills/<name>/`.
+- **Copy.** `.claude/skills/<name>/` is generated, read-only and recorded in a manifest. It carries
+  its own `.gitignore` (`*`), so git ignores it whatever else is in `.claude/skills`.
+- **Trigger.** Claude Code's own hooks. There are no git hooks, build steps or installers. The copies
+  exist only on machines where Claude Code runs.
+
+---
+
+## 4. How it works
+
+### 4.1 Lifecycle
+
+| When | Hook | What the bridge does |
+|---|---|---|
+| A session starts (also on resume, `/clear` and compaction) | `SessionStart` | Copies new and changed skills and deletes the copies of removed ones. Then it tells Claude Code to reload skills (`reloadSkills`) and to watch `.agents/skills` (`watchPaths`). Skills are available from the first prompt. |
+| A file under `.agents/skills` changes, whether Claude, an IDE, `git pull` or `svn update` changed it | `FileChanged` | Syncs again. Claude Code's skill watcher picks up the new copy within seconds. |
+| Claude tries to edit a file in `.claude/skills` | `PreToolUse` | Refuses the edit if the file belongs to a copy, and names the source file to change instead. |
+
+### 4.2 Components
+
+| Path | In version control | Role |
+|---|---|---|
+| `.agents/skills/<name>/` | yes | The skills, and the only copy anyone edits |
+| `.claude/settings.json` | yes | The hooks: `SessionStart`, `FileChanged`, and `PreToolUse` in two entries |
+| `.claude/hooks/agent-skills-bridge.sh` | yes | The bridge, in POSIX `sh`, for macOS, Linux and Windows with Git Bash |
+| `.claude/hooks/agent-skills-bridge.ps1` | yes | The same bridge for Windows without Git Bash, in PowerShell 5.1 or 7, and the way to run the bridge by hand in cmd or PowerShell |
+| `.claude/hooks/agent-skills-bridge.test.sh` | yes | Scenario tests for both implementations |
+| `.claude/hooks/agent-skills-bridge.md` | yes | Documentation for maintainers and users |
+| `.claude/hooks/.gitattributes` | yes (git) | Keeps the shell scripts LF in every git checkout |
+| `.claude/skills/.gitignore` | yes (git) | The **anchor**. It keeps the folder in every checkout and contains only comments |
+| `svn:ignore *` on `.claude/skills` | yes (svn) | Keeps the copies out of svn; svn reads no `.gitignore` |
+| `.claude/skills/<name>/` | no, ignored | Generated copies, each with its own `.gitignore` |
+| `.claude/skills/.agent-skills-bridge/` | no, ignored | The bridge's records (manifest, stamp, lock); the folder ignores itself |
+
+### 4.3 One hook command for every shell
+
+Claude Code runs hooks in `/bin/sh` on macOS and Linux, and in Git Bash on Windows. On Windows
+without Git Bash it runs them in PowerShell. It never runs them in cmd.exe, and it chooses the shell
+itself, so the terminal someone starts it from doesn't matter. Every hook therefore uses a single
+command that is valid in both shell families:
+
+```text
+set \' ; ASB_CMD=session . "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.sh" ; exit ; #' ; & "$env:CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.ps1" session ; exit $LASTEXITCODE
+```
+
+- **POSIX shell.** `\'` is a literal quote. The shell sources the script and exits, and the rest is a
+  comment.
+- **PowerShell.** `\'...#'` is one quoted argument to `Set-Variable`, so the POSIX half is inert.
+  PowerShell runs the `.ps1` file and passes its exit code on.
+- **cmd.exe.** A hook's `shell` setting accepts only `bash` and `powershell`, and
+  `CLAUDE_CODE_SHELL` and `CLAUDE_CODE_GIT_BASH_PATH` accept only bash, zsh or sh. Claude Code looks
+  for Git Bash in `CLAUDE_CODE_GIT_BASH_PATH`, then in the standard Git folders, then in the Git
+  installation of the `git` on PATH (read in the 2.1.330 program).
+- **Tested** the way Claude Code spawns each shell, including stdin, exit code 2 and paths with
+  spaces. The shells: Git Bash, Windows PowerShell 5.1, dash, bash and zsh as `sh`, and BusyBox `ash`.
+  The hook commands were also run from cmd.exe (section 8).
+
+### 4.4 Safety properties
+
+- **It touches only its own copies.** A manifest records what the bridge created. A skill that already
+  exists in `.claude/skills` is reported as a conflict and never overwritten.
+- **It never writes through a link.** If `.claude/skills` or a copy is a symlink or a Windows junction,
+  the bridge leaves it alone or unlinks it without following it. This matters on Windows, where
+  PowerShell 5.1's `Remove-Item -Recurse` and some Java tools delete *through* junctions.
+- **Copies are read-only and self-healing.** A copy that was edited or deleted is restored at the next
+  sync. That includes a copy whose `.gitignore` was deleted.
+- **Edits are redirected.** The guard refuses Claude's edits to a copy and names the source file.
+- **Concurrent runs are safe.** A lock serialises them. A lock left by a killed run expires after two
+  minutes.
+- **It fails open.** A broken bridge never blocks a session or an edit. Problems reach the user as a
+  one-line message.
+- **Kill switch.** `AGENT_SKILLS_BRIDGE=off` turns the hooks into no-ops.
+- **Nothing gets committed by accident.**
+  - git: each copy and the record folder carry their own `.gitignore`. Git ignores them whatever
+    other ignore rules say, in fresh clones and worktrees too.
+  - The bridge never edits a `.gitignore` that it didn't write.
+  - svn: `svn:ignore` on `.claude/skills` does the same.
+  - `status` asks git or svn directly whether the copies are really ignored.
+
+### 4.5 Performance
+
+- **Nothing changed** (the common case). Beyond the shell Claude Code opens for the hook, no process
+  starts at all. That costs about 0.5 s on a Windows machine where security software makes each
+  process start take 0.3 to 1 s, and milliseconds on Linux and macOS.
+- **Something changed.** About seven processes, whatever the number of skills, because the copy runs
+  as one batch. The first sync of a new checkout took 6.8 s on that slow Windows machine.
+- **The guard.** For Edit, Claude Code's `if` filter skips it for every file outside `.claude/skills`.
+  That filter can't match Write or NotebookEdit, so the guard starts on each of those calls and exits
+  at once.
+
+---
+
+## 5. Support matrix
+
+| Environment | How the bridge runs | Status |
+|---|---|---|
+| Windows with Git Bash | `sh` script in Git Bash | tests pass; live-checked in Claude desktop |
+| Windows without Git Bash | PowerShell twin | tests pass on Windows PowerShell 5.1; PowerShell 7 not run |
+| Windows, people who work in cmd | Hooks still run in Git Bash or PowerShell, never cmd. By hand: the PowerShell command in section 6 | checked from cmd.exe (section 8) |
+| Linux | `sh` script | tests pass with dash (Debian, Ubuntu), bash as `sh` (Fedora, RHEL, Arch), zsh as `sh` and BusyBox (Alpine, containers) |
+| macOS | `sh` script (bash 3.2) | bash 3.2's known pitfalls are handled (see section 8); not run on a Mac |
+| git | each copy ignores itself; `.claude/hooks/.gitattributes` keeps the script LF | tested, including a clone with `core.autocrlf=true` |
+| svn | `svn:ignore *` on `.claude/skills`, `svn:eol-style LF` on the script | tested |
+| An existing `.claude` folder | settings merged by hand; everything else untouched | tested in git and svn (section 6) |
+| Claude desktop, plain folder | project root is the folder | live-checked |
+| Claude desktop, app worktree | project root is the **main checkout** (see section 7) | live-checked |
+| Claude Code in a terminal | project root is the start folder | Same engine as the desktop app. Even the older 2.1.220 CLI has every hook feature the kit uses. Not run live, because the CLI login on the test machine had expired. |
+| Claude Code on the web, cloud sessions | Linux container | not checked |
+
+**Other tools on a machine where Claude Code also runs:**
+
+| Effect of the local copy | Tools |
+|---|---|
+| None: `.claude/skills` is not read, or `.agents` wins | Codex, Junie, Copilot CLI, OpenCode 2.x |
+| None: the copies are never in the repository | Copilot cloud agent |
+| Each skill listed twice, with identical content | Cursor, OpenCode 1.x, VS Code's deprecated Local harness |
+
+For the tools that list skills twice, switches exist. In the Cursor IDE, turn off the third-party
+skills setting. In OpenCode 1.x, set `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1`.
+
+---
+
+## 6. Adoption
+
+### git
+
+1. Copy `.claude/hooks/agent-skills-bridge.*`, `.claude/hooks/.gitattributes` and
+   `.claude/skills/.gitignore` into the repository.
+2. Add the hooks from `.claude/settings.json` to the repository's settings, or copy the file if it has
+   none.
+3. Put the skills in `.agents/skills/<name>/SKILL.md` and commit.
+
+### svn
+
+Copy the same files, except the two git files. Then run:
+
+```sh
+svn add --parents .claude/settings.json .claude/hooks/agent-skills-bridge.* .agents
+svn mkdir --parents .claude/skills
+printf '*\n' > svn-ignore.txt && svn propset svn:ignore -F svn-ignore.txt .claude/skills && rm svn-ignore.txt
+svn propset svn:eol-style LF .claude/hooks/agent-skills-bridge.sh .claude/hooks/agent-skills-bridge.test.sh
+svn commit -m "Share .agents/skills with Claude Code"
+```
+
+On Windows, `svn.exe` expands a `*` on its own command line, even inside quotes. The ignore value
+must therefore come from a file (`-F`), or be set in TortoiseSVN's Properties dialog.
+
+### Next to an existing `.claude` folder
+
+| Already there | What to do |
+|---|---|
+| `.claude/settings.json` | Add the bridge's three hook entries next to your own. Claude Code runs all matching hooks. Claude Code itself can do the merge. |
+| Other hooks in `.claude/hooks` | Nothing. The kit's file names start with `agent-skills-bridge`. |
+| Claude-only skills in `.claude/skills` | git: nothing; the copies ignore only themselves. svn: add a new skill folder by name, since `svn:ignore` hides the folder's direct entries. |
+| A `.claude/skills/.gitignore` with your own rules | Keep it. The bridge never edits it and needs no line in it. |
+| A skill with the same name in both folders | Reported as a conflict, and both are left alone. |
+| `.claude/skills` as a link (the usual hand-made workaround) | Left alone and reported. Delete the link to switch to the bridge. |
+| A root `.gitignore` that ignores `.claude/` | Replace the rule with `.claude/*`, `!.claude/settings.json`, `!.claude/hooks/` and `!.claude/skills/`. `settings.local.json` stays ignored. |
+
+The kit's documentation has a merged `settings.json` example.
+
+### Check a repository
+
+```sh
+sh .claude/hooks/agent-skills-bridge.sh status
+```
+
+In cmd or PowerShell on Windows, `sh` is usually not on PATH: Git for Windows adds only its `cmd`
+folder by default. There, use the PowerShell twin, with or without Git Bash:
+
+```text
+powershell -NoProfile -ExecutionPolicy Bypass -File .claude\hooks\agent-skills-bridge.ps1 status
+```
+
+`status` reports:
+- the skills, the copies and whether they are current;
+- any conflicts;
+- skill names that break the Agent Skills spec;
+- whether git or svn really ignores the copies, and whether `.claude/skills` is in the repository;
+- whether the hooks are in place.
+
+Both scripts take the same commands: `status`, `sync` and `clean`.
+
+### Check it by hand
+
+The kit's documentation has a step-by-step manual test, "Manual test", for Claude desktop and for the
+terminal CLI. It takes about ten minutes and assumes no knowledge of the kit. A throwaway skill,
+`bridge-check`, shows that:
+
+1. a new session copies the skill to `.claude/skills`;
+2. Claude Code knows it: typing `/bridge-check` gets the answer `BRIDGE CHECK OK - version 1`;
+3. a change to the skill reaches the running session (`version 2`);
+4. Claude can't edit the copy: the guard's message appears instead;
+5. git or svn never sees the copy;
+6. deleting the skill deletes the copy.
+
+Each step gives the exact commands for Windows and for macOS, Linux and Git Bash, and says what you
+should see. A closing table names the likely cause and the fix for each failed check.
+
+---
+
+## 7. Claude desktop worktree sessions
+
+The Claude desktop app starts sessions in its own worktrees (`.claude/worktrees/<name>`) with
+`--project-config-root` set to the **main checkout**. Hooks, project settings, project skills and
+`CLAUDE_PROJECT_DIR` therefore all come from the main checkout. The live check confirmed that the
+bridge follows the same rule.
+
+- **Where the kit must be.** Merge it to the branch that the main checkout has checked out. A kit
+  that exists only on a worktree branch does nothing in worktree sessions.
+- **Which skills a worktree session sees.** It sees the main checkout's skills. A skill changed only
+  on the worktree branch appears once the main checkout has that change. Skill authors can also test
+  from a terminal `claude` started inside the worktree, where the worktree is the project root.
+- **Which guard answers.** The desktop app refuses the model's edits to the main checkout from a
+  worktree session, so the app's guard answers before the bridge's.
+- **This is not specific to the bridge.** Plain `.claude/settings.json` and `.claude/skills` content
+  behaves the same way in these sessions.
+
+---
+
+## 8. Verification evidence
+
+### Automated tests
+
+The tests run the exact hook commands from `.claude/settings.json`, the way Claude Code runs them.
+They cover:
+
+- the first sync, edits, removals (including a sync that only deletes) and conflicts;
+- read-only copies, and repair after tampering or deletion;
+- the guard, for Edit, Write and NotebookEdit and for other letter cases;
+- symlinks, junctions and link loops;
+- a stale lock, the kill switch, and paths with spaces;
+- `status` and `clean`;
+- git: an existing `.claude/skills` with its own skill and `.gitignore`. Git sees the native skill's
+  files but no copy and no record. `status` spots a copy that lost its `.gitignore`, and `sync`
+  repairs it.
+- git: a clone with `core.autocrlf=true` keeps the script LF thanks to `.claude/hooks/.gitattributes`,
+  with a control clone that proves the conversion happens without it;
+- svn: `status` names what svn would add, `svn:ignore` hides the copies, and a native skill can still
+  be added and keeps showing new files.
+
+| Platform | Result |
+|---|---|
+| Windows 11, Git Bash | 77 / 77 passed (Windows has no symlinks for the link cases) |
+| Windows 11, Windows PowerShell 5.1 | 77 / 77 passed |
+| Ubuntu 24.04 (WSL2), dash | 78 / 78 passed |
+| Ubuntu 24.04 (WSL2), bash 5.2 as `sh` | 78 / 78 passed |
+| Ubuntu 24.04 (WSL2), zsh 5.9 as `sh` | 78 / 78 passed |
+| Alpine 3.24 container, BusyBox 1.37 | 59 / 59 passed (no git or svn in the image) |
+
+### Portability review (25 November 2026)
+
+A review against the question "Windows and Linux, git and svn, CLI and desktop, existing `.claude`
+folders" found these problems. All of them are fixed and covered by the tests above.
+
+| Finding | Fix |
+|---|---|
+| The old anchor (`*` in `.claude/skills/.gitignore`) hid new files of Claude-only skills in `.claude/skills` from git. | Each copy ignores itself. The anchor now ignores nothing. |
+| With an existing `.claude/skills/.gitignore`, the bridge kept that file. The copies were then visible to git and could be committed, while `status` reported the anchor as present. | Copies no longer depend on that file. `status` asks `git check-ignore` and `svn status` directly. |
+| macOS `sh` is bash 3.2. Under `set -u` it rejects an empty `"$@"`, which a sync that only deletes copies produced. | `${1+"$@"}`. A test now checks that a delete-only sync succeeds; bash 3.2 itself was not run. |
+| LF line endings depended on a manual edit of the root `.gitattributes`. A CRLF script fails in dash (checked); Git Bash copes. | The kit ships `.claude/hooks/.gitattributes`. |
+| The PowerShell `status` crashed in a non-svn repository on machines with svn installed: Windows PowerShell 5.1 turns redirected stderr into a fatal error under `Stop` (checked). | A helper runs git and svn without that effect. A test now checks that `status` runs to the end. |
+| Test harness: BusyBox compares file times in whole seconds, and zsh keeps an assignment made in front of a function call. | The tests now allow for both. The bridge itself was unaffected. |
+
+### Adoption flows
+
+| Flow | Result |
+|---|---|
+| git, existing `.claude/skills` with its own skill and ignore rules | The copies and records stay invisible, and the native skill stays visible (automated). |
+| git, root `.gitignore` with `.claude/*` and re-include rules | The kit is visible to git, and `settings.local.json` stays ignored. |
+| git, fresh clone with `core.autocrlf=true` | The script arrives with LF (automated). |
+| git worktree | The copy is made, and the status is clean. |
+| svn checkout | `svn status` is clean, and the copies are ignored (automated). |
+| `sh` and PowerShell on the same checkout | They share the manifest and stamp, and neither redoes the other's work. |
+
+### cmd.exe check (25 November 2026)
+
+A follow-up question was whether the kit also works for people who use cmd. The Claude Code program
+shows that hooks never run in cmd.exe, so the terminal doesn't matter (section 4.3). A manual check
+from cmd.exe on Windows 11, in a repository whose path has a space, covered the rest:
+
+| Check | Result |
+|---|---|
+| Claude Code's Git Bash lookup rule, applied in cmd | Found a per-user Git install through PATH. |
+| PowerShell twin: `sync`, `status`, `clean` | All succeeded, from the repository and from another folder. |
+| `status` through Git's `sh.exe`, by its full path | Succeeded. |
+| SessionStart and guard hook commands, in Git Bash and in PowerShell, with cmd's environment | SessionStart exited 0 with `reloadSkills` and `watchPaths`, and made the copy. The guard refused an edit of a copy with exit code 2. |
+| `git status` afterwards | No copies listed. |
+| The hook command typed into cmd itself | Fails ("The filename, directory name, or volume label syntax is incorrect"). Claude Code never does this. |
+
+The check found one documentation gap, now fixed. The docs offered the PowerShell command only for
+Windows without Git Bash, but `sh` is usually missing from cmd and PowerShell even where Git is
+installed.
+
+### Live checks in Claude Code 2.1.330 (Claude desktop on Windows 11)
+
+These ran before the review, with the earlier layout, which kept the ignore rule in
+`.claude/skills/.gitignore`. The hooks and the sync logic are unchanged. Claude Code's skill loader
+skips a folder without `SKILL.md` silently, so the new record folder is never taken for a skill
+(read in the 2.1.330 program).
+
+| Check | Result |
+|---|---|
+| Session start, plain folder | The skill was in Claude's list from the first prompt. The SessionStart hook took 6.8 s, including the first copy. It returned `watchPaths` and `reloadSkills`. |
+| Skill use | The skill loaded from `.claude/skills/bridge-selftest`. |
+| Edit guard | The Edit was refused within 0.23 s with the bridge's message, and the copy was unchanged. |
+| Live sync | A source edit reached the copy in 1.3 s, and the same session then used the new version. |
+| Removal | A deleted skill's copy and manifest entry were gone in 1.5 s. |
+| Desktop worktree | Hooks, `CLAUDE_PROJECT_DIR`, the copy and the watch all came from the main checkout, as described in section 7. |
+| Ignored copy | Claude Code loads skills from a `.claude/skills` folder that git ignores. |
+
+The live check also found one defect. Claude Code's `if` filter on the guard never matches the Write
+tool, so Write could create a file inside a copy. That is now fixed with a second guard entry for
+Write and NotebookEdit, without a filter.
+
+### Not yet verified
+
+- A live session with the new layout and with the Write and NotebookEdit guard entry. The tests cover
+  both.
+- The manual test as written, end to end in a live session. Its commands and expected `status`
+  outputs were dry-run on Windows, with the hooks run the way Claude Code runs them. The steps on
+  the Claude side rest on the earlier live checks and on the Claude Code program.
+- A run on macOS, and bash 3.2 itself. The official `bash:3.2` container image would allow the latter.
+- PowerShell 7.
+- The terminal Claude Code CLI on the test machine (its login had expired), and cloud sessions.
+
+---
+
+## 9. Alternatives considered
+
+| Option | Decision | Reason |
+|---|---|---|
+| Commit `.claude/skills` as symlinks to `.agents/skills` | rejected | Windows needs Developer Mode for symlinks. Without it, git and svn check them out as plain text files. |
+| Create symlinks or junctions locally with a script | rejected | Junctions hold absolute paths, and some recursive deletes follow them into the real skills. Each OS also needs its own code and privileges. |
+| Commit a mirrored copy of `.claude/skills` | rejected | Every change shows up twice in reviews, the two drift apart, and Cursor and similar tools list duplicates for everyone. |
+| Claude Code's `/import cursor` | rejected | It works only interactively, never refreshes a copy, and drops frontmatter such as `allowed-tools`. |
+| A Claude Code plugin | rejected | Plugins are copied into a cache and their skills get prefixed names. Every user must approve the install. |
+| Make `.claude/skills` the canonical folder | rejected | Codex and Junie don't read it, and `.agents/skills` is the emerging standard. |
+| One `.gitignore` in `.claude/skills` for all copies | replaced | It hid Claude-only skills from git, and it did nothing where a team already had its own file there. |
+| **A local copy driven by Claude Code hooks, each copy ignoring itself** | **chosen** | It needs no setup, no symlinks and no generated files in version control. It works on every OS, in both VCSs and next to existing `.claude` content. Python's `venv` and pytest's cache use the same self-ignoring pattern. |
+
+---
+
+## 10. Limitations and risks
+
+| Item | Impact | Mitigation |
+|---|---|---|
+| Duplicate listings in Cursor, OpenCode 1.x and the VS Code Local harness | Identical skills are listed twice on machines that also run Claude Code. Behaviour is unchanged, but some context is wasted. | Per-tool switches (section 5). The duplicates go away once Claude Code reads `.agents/skills` itself. |
+| Desktop worktree sessions use the main checkout | A skill edited only on a worktree branch isn't served there. | Documented, and native `.claude/skills` behaves the same. Test from the main checkout or the terminal CLI. |
+| The organisation turns off project hooks (`disableAllHooks`, `allowManagedHooksOnly`) | The bridge doesn't run. | Run `sh .claude/hooks/agent-skills-bridge.sh sync` (in cmd or PowerShell, the `.ps1`), then `/reload-skills`. |
+| A Group Policy enforces `AllSigned` for PowerShell | On Windows without Git Bash, the `.ps1` doesn't run. | Install Git for Windows (hooks then run in Git Bash), or sign the script. |
+| svn: `svn:ignore *` also hides a new Claude-only skill folder | Someone must add it by name. | Documented. Files inside an added skill folder behave normally. |
+| Merging the hooks into an existing `settings.json` is manual | A wrong merge leaves the bridge off. | `status` reports missing hooks. Claude Code can do the merge on request. |
+| Each Write or NotebookEdit call starts the guard | A small delay per call. It is noticeable only on machines with slow process starts. | The guard exits at once outside `.claude/skills`. Claude Code's `if` filter can't help for these tools. |
+| The file watcher can't see changes, for example in WSL on `/mnt/c` | Changes made outside Claude arrive at the next session start. | Start a new session, or run `sync` and `/reload-skills`. |
+| Claude Code adds native `.agents/skills` support | Claude Code may list each skill twice until the bridge is removed. | Follow the exit plan in section 11 and watch #31005. |
+| The two implementations drift apart | One platform starts behaving differently from the others. | One test suite runs both implementations against the same scenarios. |
+
+---
+
+## 11. Exit plan
+
+When Claude Code reads `.agents/skills` itself:
+
+1. Delete the three hooks from `.claude/settings.json`.
+2. Run `sh .claude/hooks/agent-skills-bridge.sh clean` (in cmd or PowerShell, the `.ps1` with
+   `clean`) to delete the copies and the bridge's records.
+3. Delete `.claude/hooks/agent-skills-bridge.*`. Delete `.claude/hooks/.gitattributes` unless other
+   scripts need it, and the anchor unless Claude-only skills live in `.claude/skills`.
+
+The skills themselves stay where they are, in `.agents/skills`.
+
+---
+
+## 12. References
+
+- Claude Code feature request for `.agents/skills`:
+  [anthropics/claude-code#31005](https://github.com/anthropics/claude-code/issues/31005)
+- Agent Skills specification: <https://agentskills.io/specification>
+- Claude Code skills documentation: <https://code.claude.com/docs/en/skills>
+- Kit documentation: [`.claude/hooks/agent-skills-bridge.md`](../.claude/hooks/agent-skills-bridge.md),
+  which travels with the kit into every project
+- The tool behaviour described here was checked against each tool's documentation in November 2026.
+  Cursor's duplicate listing is documented only on its forum.
