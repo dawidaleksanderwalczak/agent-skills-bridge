@@ -1464,6 +1464,45 @@ check "a copy in no record that someone changed is a conflict" contains "$out" '
 check "and keeps the change" grep -q 'Changed in the copy.' "$V/.claude/skills/alpha/SKILL.md"
 check "the copy that nobody changed is the bridge's again" grep -qx beta "$VS/manifest"
 
+echo "40. a skill with a file dated ahead of the clock"
+D=$(new_repo ahead)
+DS=$D/.claude/skills/.agent-skills-bridge
+skill "$D" alpha
+skill "$D" beta
+mkdir -p "$D/.agents/skills/alpha/refs"
+echo 'ref 1' > "$D/.agents/skills/alpha/refs/ref.md"
+# An archive leaves such times, or the clock of another machine: here on a file and on its folder.
+# No stamp of a sync is ever newer than they are.
+touch -t 203701010000 "$D/.agents/skills/alpha/refs/ref.md" "$D/.agents/skills/alpha/refs"
+sleep 1 # see 1
+bridge "$D" session > /dev/null
+check "the skill is copied, with that file" grep -qx 'ref 1' "$D/.claude/skills/alpha/refs/ref.md"
+out=$(bridge "$D" session)
+check "the next hook does not copy it again because of that time" lacks "$out" 'reloadSkills'
+st=$(bridge "$D" status 2>&1)
+check "and status calls the copies current" contains "$st" 'copies are current'
+settled "a hook with nothing else to do starts no program for it" "$D"
+# What is new is still copied. First a file next to that one, with the time it is.
+sleep 1 # see 1
+skill "$D" alpha "Second body."
+sleep 1 # see 1: or this edit counts as new once more below, where clocks tick in whole seconds
+bridge "$D" sync > /dev/null
+check "an edit next to that file is copied" grep -q 'Second body.' "$D/.claude/skills/alpha/SKILL.md"
+# Then that file itself. It changes in its place, so its folder says nothing, and it comes with a
+# later time ahead of the clock, as from a drive whose clock runs ahead.
+echo 'ref 2' > "$D/.agents/skills/alpha/refs/ref.md"
+touch -t 203801010000 "$D/.agents/skills/alpha/refs/ref.md"
+sleep 1 # see 1
+bridge "$D" sync > /dev/null
+check "an edit of that file which comes with a later time is copied too" grep -qx 'ref 2' "$D/.claude/skills/alpha/refs/ref.md"
+out=$(bridge "$D" session)
+check "and it is copied once, not at every hook" lacks "$out" 'reloadSkills'
+# The record of those times goes with the skill.
+rm -rf "$D/.agents/skills/alpha"
+bridge "$D" sync > /dev/null
+check "the copy goes with its skill" test ! -e "$D/.claude/skills/alpha"
+check "and the records hold nothing of it any more" test "$(cd "$DS" && echo .[!.]* *)" = '.gitignore manifest stamp'
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]

@@ -42,10 +42,13 @@ $state = Join-Path $dst '.agent-skills-bridge' # the bridge's records; like each
 $manifest = Join-Path $state 'manifest'
 $stamp = Join-Path $state 'stamp'
 $lock = Join-Path $state 'lock'
+$nowFile = Join-Path $state 'now' # written to learn what time it is: see Get-ProbeTime
 $notes = New-Object System.Collections.Generic.List[string]
 $script:changed = $false
 $script:skipped = $false
 $script:lockStream = $null
+$script:probed = $false
+$script:probeTime = $null
 $reparse = [IO.FileAttributes]::ReparsePoint
 $readOnly = [IO.FileAttributes]::ReadOnly
 $maxDepth = 16 # folders nested deeper than this are taken for a link loop, as in the shell script
@@ -218,12 +221,40 @@ function Get-Entries([string]$Folder) {
   catch { return , @() }
 }
 
+# The time it is, by the clock of the file system: the time of a file that is written to learn it,
+# as for the stamp. Nothing when no such file can be written. Asked once for each plan.
+function Get-ProbeTime {
+  if (-not $script:probed) {
+    $script:probed = $true
+    $script:probeTime = $null
+    try {
+      [IO.File]::WriteAllText($nowFile, '', $utf8)
+      $script:probeTime = Get-WriteTime $nowFile
+    }
+    catch { }
+  }
+  return $script:probeTime
+}
+
+# True when an entry of a skill, written at $Written and not older than the stamp, has nothing new
+# to say all the same: its time lies ahead of the clock, and the last copy of its skill saw a time
+# as late as this one. An archive or another machine's clock leaves such times, and no stamp is ever
+# newer than they are, so they would make every hook copy the skill again. $Seen is the time on
+# record for the skill (see Set-AheadRecord), or nothing: then the clock is not even asked. An
+# entry that comes with a time later than the record is new. One that comes with an earlier time
+# ahead of the clock is copied once the clock has reached it.
+function Test-OldNews([DateTime]$Written, $Seen) {
+  if ($null -eq $Seen) { return $false }
+  $now = Get-ProbeTime
+  return ($null -ne $now) -and ($Written -gt $now) -and ($Written -le $Seen)
+}
+
 # True when something in the folder $Folder changed since the last sync. In a skill ($Follow): written
 # at or after $Time, when that sync began, with links followed as the copy follows them. In a copy:
 # written after $Time, when that sync ended, with no link followed. $Above lists the folders around
 # $Folder: a link back to one of them is a loop, which the copy leaves out. Past $maxDepth levels
-# the answer for a skill is "changed", as in the shell script.
-function Test-FolderChanged([string]$Folder, [DateTime]$Time, [bool]$Follow, [string[]]$Above = @()) {
+# the answer for a skill is "changed", as in the shell script. $Seen: see Test-OldNews.
+function Test-FolderChanged([string]$Folder, [DateTime]$Time, [bool]$Follow, [string[]]$Above = @(), $Seen = $null) {
   if ($Follow -and $Above.Count -ge $maxDepth) { return $true }
   $here = $Above + $Folder
   foreach ($e in (Get-Entries $Folder)) {
@@ -240,9 +271,10 @@ function Test-FolderChanged([string]$Folder, [DateTime]$Time, [bool]$Follow, [st
     }
     if ($Follow -and (Test-OwnFolder $item.FullName)) { continue } # reached through a link: not part of the skill
     $written = $item.LastWriteTimeUtc
-    if ($written -gt $Time -or ($Follow -and $written -eq $Time)) { return $true }
+    if (($written -gt $Time -or ($Follow -and $written -eq $Time)) -and
+      -not ($Follow -and (Test-OldNews $written $Seen))) { return $true }
     if (($item -is [IO.DirectoryInfo]) -and ($here -notcontains $item.FullName) -and
-      (Test-FolderChanged $item.FullName $Time $Follow $here)) { return $true }
+      (Test-FolderChanged $item.FullName $Time $Follow $here $Seen)) { return $true }
   }
   return $false
 }
@@ -251,7 +283,57 @@ function Test-FolderChanged([string]$Folder, [DateTime]$Time, [bool]$Follow, [st
 function Test-SourceChanged([string]$Name, [DateTime]$Since) {
   $item = Resolve-Item (Get-Item -LiteralPath (Join-Path $src $Name) -Force)
   if (-not $item) { return $false }
-  return ($item.LastWriteTimeUtc -ge $Since) -or (Test-FolderChanged $item.FullName $Since $true)
+  $seen = $null
+  $record = Get-Item -LiteralPath (Join-Path $state "ahead.$Name") -Force -ErrorAction SilentlyContinue
+  if ($record) { $seen = $record.LastWriteTimeUtc }
+  if (($item.LastWriteTimeUtc -ge $Since) -and -not (Test-OldNews $item.LastWriteTimeUtc $seen)) { return $true }
+  return (Test-FolderChanged $item.FullName $Since $true @() $seen)
+}
+
+# The latest time among the entries of the folder $Folder, with links followed as far as
+# Test-FolderChanged follows them.
+function Get-NewestTime([string]$Folder, [string[]]$Above = @()) {
+  $latest = [DateTime]::MinValue
+  if ($Above.Count -ge $maxDepth) { return $latest }
+  $here = $Above + $Folder
+  foreach ($e in (Get-Entries $Folder)) {
+    $item = $e
+    if ($e.Attributes -band $reparse) {
+      $item = Resolve-Item $e
+      if (-not $item) { continue }
+    }
+    if (Test-OwnFolder $item.FullName) { continue }
+    if ($item.LastWriteTimeUtc -gt $latest) { $latest = $item.LastWriteTimeUtc }
+    if (($item -is [IO.DirectoryInfo]) -and ($here -notcontains $item.FullName)) {
+      $below = Get-NewestTime $item.FullName $here
+      if ($below -gt $latest) { $latest = $below }
+    }
+  }
+  return $latest
+}
+
+# For the skill $Name, which this sync is about to copy: puts on record how late the times in it
+# are, where one lies ahead of the clock (see Test-OldNews). $Clock is the time of the stamp of
+# this sync, which was written when the sync began. The record is a file that gets the time of the
+# latest entry. A record that is of no use any more is deleted.
+function Set-AheadRecord([string]$Name, [DateTime]$Clock) {
+  $record = Join-Path $state "ahead.$Name"
+  $latest = [DateTime]::MinValue
+  $item = Get-Item -LiteralPath (Join-Path $src $Name) -Force -ErrorAction SilentlyContinue
+  if ($item) { $item = Resolve-Item $item }
+  if ($item) {
+    $latest = $item.LastWriteTimeUtc
+    $below = Get-NewestTime $item.FullName
+    if ($below -gt $latest) { $latest = $below }
+  }
+  try {
+    if ($latest -gt $Clock) {
+      [IO.File]::WriteAllText($record, '', $utf8)
+      (Get-Item -LiteralPath $record -Force).LastWriteTimeUtc = $latest
+    }
+    else { Remove-Item -LiteralPath $record -Force -ErrorAction SilentlyContinue }
+  }
+  catch { Remove-Item -LiteralPath $record -Force -ErrorAction SilentlyContinue }
 }
 
 # True when the copy of the skill $Name, or anything in it, changed after $After (the end of the last sync).
@@ -389,6 +471,7 @@ function Test-Leftover([string]$Name) {
 # which of the skills in Stale have a folder that is a leftover in no record (Adopted). Select-Own
 # fills Taken and Why.
 function Get-Plan {
+  $script:probed = $false
   $records = Read-Records
   $plan = @{
     Source = (Get-SourceNames); Managed = $records.Managed; Doubt = $records.Doubt
@@ -745,6 +828,13 @@ function Invoke-Sync {
     if ($work.Count) { $script:changed = $true }
     $broken = $false
     $kept = @()
+    # Before the skills are copied, so that a time which comes later than these is new to the next
+    # plan. Should the copy fail, the skill is out of date for other reasons.
+    $clock = Get-WriteTime $newStamp
+    foreach ($n in $plan.Stale) { Set-AheadRecord $n $clock }
+    foreach ($n in $plan.Gone) {
+      Remove-Item -LiteralPath (Join-Path $state "ahead.$n") -Force -ErrorAction SilentlyContinue
+    }
     foreach ($n in $plan.Gone) {
       if (-not (Remove-Copy $n)) {
         Add-Note "Could not delete the old copy .claude/skills/$n; is a file in it open?"
@@ -792,8 +882,9 @@ function Invoke-Sync {
     }
   }
   finally {
-    # The waiting stamp and the manifest that was on its way, where the sync did not use them.
-    Remove-Item -LiteralPath $newStamp, $newManifest -Force -ErrorAction SilentlyContinue
+    # The waiting stamp and the manifest that was on its way, where the sync did not use them, and
+    # the file that told the time.
+    Remove-Item -LiteralPath $newStamp, $newManifest, $nowFile -Force -ErrorAction SilentlyContinue
     Exit-Lock
   }
 }

@@ -175,6 +175,10 @@ set \' ; test -r "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.sh" || e
   skills, and the next sync copies every skill that holds a file changed at or after that stamp. A
   file that changes while a sync is running, for example during a `git pull`, is copied by the next
   hook.
+- **A time ahead of the clock is copied once.** An archive or another machine's clock can leave a
+  file with a time that no stamp will ever be newer than. The bridge puts on record how late the
+  times in such a skill are, and copies the skill again only when a later one turns up or
+  something else in it changes.
 - **Edits are redirected.** The guard refuses Claude's edits to a copy and names the source file. It
   knows the usual spellings of a path: relative, with `.` and `..`, in another letter case, and the
   Git Bash and network forms.
@@ -368,6 +372,8 @@ They cover:
 - the way back to the branch that has the skill in `.agents/skills`, where the copy is made again;
 - a sync that finds a skill of someone's own and is killed, records that the scripts of before left
   unfinished, and records that were lost;
+- a skill with a file and a folder dated ahead of the clock: copied once, and again when something
+  next to them changes or one of them comes with a later time;
 - a stale lock, the kill switch, and paths with spaces, with a letter outside ASCII, and on a network
   share;
 - files saved with CRLF, read-only folders, `CDPATH`, and zsh with an alias and an option from
@@ -383,13 +389,13 @@ They cover:
 
 | Platform | Result |
 |---|---|
-| Windows 11, Git Bash | 304 / 304 passed (Windows has no symlinks for the link cases) |
-| Windows 11, Windows PowerShell 5.1 | 301 / 301 passed |
-| Ubuntu 24.04 (WSL2), dash | 287 / 287 passed |
-| Ubuntu 24.04 (WSL2), bash 5.2 as `sh` | 287 / 287 passed |
-| Ubuntu 24.04 (WSL2), zsh 5.9 as `sh` | 287 / 287 passed |
-| Ubuntu 24.04 (WSL2), zsh 5.9 as the hook shell | 289 / 289 passed |
-| Alpine 3.24 container, BusyBox 1.37 | 233 / 233 passed (no git, svn or node in the image) |
+| Windows 11, Git Bash | 313 / 313 passed (Windows has no symlinks for the link cases) |
+| Windows 11, Windows PowerShell 5.1 | 310 / 310 passed |
+| Ubuntu 24.04 (WSL2), dash | 296 / 296 passed |
+| Ubuntu 24.04 (WSL2), bash 5.2 as `sh` | 296 / 296 passed |
+| Ubuntu 24.04 (WSL2), zsh 5.9 as `sh` | 296 / 296 passed |
+| Ubuntu 24.04 (WSL2), zsh 5.9 as the hook shell | 298 / 298 passed |
+| Alpine 3.24 container, BusyBox 1.37 | 242 / 242 passed (no git, svn or node in the image) |
 
 A case that needs something the system lacks is skipped: symlinks and file modes on Windows, junctions
 and network paths elsewhere.
@@ -777,7 +783,7 @@ and deletes it once the skill is gone. The "repair" tests pass unchanged.
   begun; a skill that a file manager moved over its copy was still deleted; a hook that ran during
   a long checkout got git's answer of the branch before; and a git that failed made copies stop
   being copies. The review also killed a sync and a `clean` after every line of the shell script
-  that they pass through. That was repeated in dash on the scripts as they are now: 511 kills took
+  that they pass through. That was repeated in dash on the scripts as they are now: 548 kills took
   effect, and after each of them the next sync left the skills of someone's own where they were,
   took no copy for someone's own, and finished the work.
 - **Limits.** The bridge can only be as sure as its signs are.
@@ -803,6 +809,57 @@ and deletes it once the skill is gone. The "repair" tests pass unchanged.
   - A folder in no record that looks like an untouched copy is replaced also where git tracks it,
     because someone committed a copy. It holds what the bridge copied, so nothing of anyone's is
     lost, and `status` names such a copy as not ignored.
+
+### A time ahead of the clock (26 November 2026)
+
+The work on "Who owns a copy" turned up one more defect. It is older than that work, and it got a
+change of its own.
+
+| Finding | Fix |
+|---|---|
+| Both: a skill that held a file or a folder with a time ahead of the clock was copied again at every hook. An archive leaves such times, and so does a machine or a drive whose clock runs ahead. The bridge copies what is not older than the stamp of the last sync, and no stamp is ever newer than a time that has not come yet. So a hook with nothing to do started 7 programs, every time, until the clock had reached that time. | When the bridge copies a skill, it puts on record how late the times in it are, where one lies ahead of the clock. From then on, an entry with a time ahead of the clock that is no later than the record has nothing new to say. |
+
+- **What time it is.** To tell a time ahead of the clock from an edit that has just come, the
+  bridge must know what time it is, and a shell cannot read a clock without starting a program.
+  So it writes a file, `now`, into its records and takes that file's time. That is the clock of the
+  file system, which also stamps the skills' files, as for the stamp of a sync. The file is
+  written only where a skill has such a record and holds an entry that is not older than the stamp.
+  An ordinary hook writes nothing. Where the file cannot be written, the entry counts as changed,
+  as before.
+- **The record** is a file `ahead.<name>` in the records, which gets the time of the latest entry
+  of the skill. A sync writes it before it copies the skill. Its clock is the stamp that it wrote
+  when it began: an entry newer than that is ahead of the clock, or has just been written, and
+  then it is not ahead at the next plan and counts as changed there. The shell script sets the
+  time with `touch -r`, one program more for a sync that copies such a skill. The PowerShell twin
+  sets it by itself. When no time in the skill lies ahead any more, or the skill is gone, the
+  record goes too.
+- **What is still copied.** An edit with the time it is, as ever. A file that turns up, whatever
+  its time: its folder changes then. And an entry that changes in its place and comes with a
+  later time ahead of the clock, which is what a drive with a fast clock delivers, edit after
+  edit. Each is copied once.
+- **What was weighed.**
+  - To take no time ahead of the clock for a change needs no record. But an edit that comes with
+    such a time would wait until the clock has reached it, and on a drive whose clock runs ahead
+    that is every edit: the hook that the edit starts would find nothing, and no other hook follows.
+  - To set such a file's time back would end it at the root. The bridge writes only in
+    `.claude/skills`, though, and on a drive with a fast clock the time would be ahead again.
+  - To keep each file's time in its copy and compare the two would tell every change, also the
+    open finding "A file replaced by an older one". It changes what a copy looks like, and with it
+    the signs of "Who owns a copy". That is a decision of its own.
+- **Counted in dash.** Before: 7 programs at every hook, also when nothing had changed. Now: 8 for
+  a sync that copies a skill with such a time, and none at the hooks after it. A sync that copies
+  another skill still starts 7, and a hook with nothing to do still starts none where no time lies
+  ahead.
+- **Limits.** An entry that changes in its place and comes with a time ahead of the clock that is
+  no later than the record is copied when the clock has reached that time, or when something else
+  in the skill changes. That is the open finding "A file replaced by an older one" in another
+  dress. And when the clock reaches a time on record, the skill is copied once more.
+- **Tests.** Section 40 gives a file and its folder the year 2037. The skill must be copied once,
+  `status` must call the copies current, and the next hook must start no program. An edit next to
+  the file and an edit of the file that comes with the year 2038 must each be copied, once.
+  Against the scripts of before, 4 of the 9 checks fail in dash, with zsh as the hook shell, in
+  BusyBox and in Windows PowerShell 5.1. A sync and a `clean` were killed after every line once
+  more, and the two scripts were run on one checkout with such a skill.
 
 ### Adoption flows
 
@@ -839,8 +896,8 @@ installed.
 
 These ran before the reviews, with the earlier layout, which kept the ignore rule in
 `.claude/skills/.gitignore`. The hook commands are the same today; the scripts behind them have
-changed as the two review sections and the six sections after them describe, from "An edit during
-a sync" on. Claude Code's skill loader skips a folder without `SKILL.md` silently, so the new record
+changed as the two review sections and the seven sections after them describe, from "An edit
+during a sync" on. Claude Code's skill loader skips a folder without `SKILL.md` silently, so the new record
 folder is never taken for a skill.
 
 | Check | Result |

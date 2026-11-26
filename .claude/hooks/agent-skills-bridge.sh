@@ -59,6 +59,9 @@ state=$dst/.agent-skills-bridge # the bridge's records; like each copy, the fold
 manifest=$state/manifest
 stamp=$state/stamp
 lock=$state/lock
+now=$state/now # written to learn what time it is: see old_news
+seen=          # the record of the times ahead of the clock in the skill at hand: see old_news
+drop=          # records to delete when the sync ends: see note_ahead
 notes=
 changed=0
 nl='
@@ -248,12 +251,31 @@ read_manifest() {
   if [ "$seen" = 1 ]; then sform=new; elif [ "$lines" -gt 0 ]; then sform=old; else sform=cut; fi
 }
 
+# True when $1, which is not older than the stamp, has nothing new to say all the same: its time
+# lies ahead of the clock, and the last copy of its skill saw a time as late as this one. An archive
+# or another machine's clock leaves such times, and no stamp is ever newer than they are, so they
+# would make every hook copy the skill again. The record is $seen, a file that note_ahead gave the
+# latest time in the skill. Without it the shell is not even asked what time it is. It cannot read
+# a clock, so it writes a file and takes that file's time, which is the clock of the file system,
+# as for the stamp. An entry that comes with a time later than the record is new. One that comes
+# with an earlier time ahead of the clock is copied once the clock has reached it.
+probed=0
+old_news() {
+  [ -f "$seen" ] || return 1
+  if [ "$probed" = 0 ]; then
+    probed=2 # no such file can be written: every entry counts as changed, as ever
+    if { : > "$now"; } 2> /dev/null; then probed=1; fi
+  fi
+  # A sync that ends takes the file away with its lock: then nothing is known, and the entry is new.
+  [ "$probed" = 1 ] && [ "$1" -nt "$now" ] && [ -e "$now" ] && [ ! "$1" -nt "$seen" ]
+}
+
 # True when $1, or anything under it, changed at or after the stamp (taken when the last sync began).
 # Follows links, as the copy does; past 16 levels (a link loop?) it answers "changed". A link to
 # nowhere has nothing to copy and counts for nothing: [ -nt ] would answer differently per shell.
 depth=0
 src_changed() {
-  [ "$stamp" -nt "$1" ] || return 0
+  [ "$stamp" -nt "$1" ] || old_news "$1" || return 0
   [ -d "$1" ] || return 1
   depth=$((depth + 1))
   if [ "$depth" -gt 16 ]; then
@@ -268,6 +290,40 @@ src_changed() {
   done
   depth=$((depth - 1))
   return 1
+}
+
+# Sets nw to whichever has the latest time: $nw, $1, or an entry under $1. Follows links as far as
+# src_changed does.
+newest() {
+  [ ! "$1" -nt "$nw" ] || nw=$1
+  [ -d "$1" ] || return 0
+  depth=$((depth + 1))
+  if [ "$depth" -le 16 ]; then
+    for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+      [ ! -e "$e" ] || newest "$e"
+    done
+  fi
+  depth=$((depth - 1))
+}
+
+# For the skills in the arguments, which this sync is about to copy: puts on record how late the
+# times in a skill are, where one lies ahead of the clock (see old_news). The clock is the stamp of
+# this sync, which waits in the lock folder since the sync began. The record is a file that gets
+# the time of the latest entry, with one process for each such skill, and none where no time lies
+# ahead. A record that is of no use any more goes with the lock: see acquire_lock.
+note_ahead() {
+  for n in ${1+"$@"}; do
+    nw=$src/$n
+    newest "$src/$n"
+    if [ "$nw" -nt "$lock/stamp" ]; then
+      touch -r "$nw" "$state/ahead.$n" 2> /dev/null
+      # A touch that keeps a time less exactly than the shell compares it leaves the entry newer
+      # than its record. Such a record is of no use, and every hook copies the skill, as before.
+      [ ! "$nw" -nt "$state/ahead.$n" ] || drop="$drop $state/ahead.$n"
+    elif [ -e "$state/ahead.$n" ]; then
+      drop="$drop $state/ahead.$n"
+    fi
+  done
 }
 
 # True when $1, or anything under it, changed after the manifest (written when the last sync ended).
@@ -359,6 +415,7 @@ plan() {
   gone=
   conflicts=
   adopted=
+  probed=0
   fresh=1 # the last sync finished, so the stamp can be trusted
   # The stamp of a sync that has not ended holds text, and it is newer than the manifest.
   if [ ! -f "$stamp" ] || [ ! -f "$manifest" ] || [ -s "$stamp" ] || [ "$stamp" -nt "$manifest" ]; then fresh=0; fi
@@ -370,6 +427,7 @@ plan() {
   for n in $src_names; do
     if has "$managed" "$n"; then
       wanted="$wanted $n"
+      seen=$state/ahead.$n
       if [ "$fresh" = 0 ] || [ ! -d "$dst/$n" ] || [ -L "$dst/$n" ] ||
         src_changed "$src/$n" || copy_changed "$dst/$n"; then stale="$stale $n"; fi
     elif [ -e "$dst/$n" ] || [ -L "$dst/$n" ]; then
@@ -691,8 +749,10 @@ acquire_lock() {
   done
   # With the lock goes what a killed sync of the PowerShell twin left in the records: its waiting
   # stamp, and the manifest that was on its way. While this run holds the lock they are nobody's,
-  # so the lock goes last.
-  trap 'rm -rf "$stamp.tmp" "$manifest.tmp" "$lock"' EXIT
+  # so the lock goes last. The file that told the time goes too, and the records of times ahead
+  # of the clock that are of no use any more ($drop: paths made from validated names).
+  # shellcheck disable=SC2086
+  trap 'rm -rf "$stamp.tmp" "$manifest.tmp" "$now" $drop "$lock"' EXIT
   trap 'exit 130' HUP INT TERM
   return 0
 }
@@ -790,6 +850,13 @@ do_sync() {
   }
   [ -z "$stale$gone" ] || changed=1
   broken=0
+  # Before the skills are copied, so that a time which comes later than these is new to the next
+  # plan. Should the copy fail, the skill is out of date for other reasons.
+  # shellcheck disable=SC2086 # validated names
+  note_ahead $stale
+  for n in $gone; do
+    [ ! -e "$state/ahead.$n" ] || drop="$drop $state/ahead.$n"
+  done
   # Only what was a copy or a leftover when the sync looked is deleted. A folder that turns up under
   # the name of a new copy meanwhile is someone's own: copy_skills finds it there and leaves it.
   redo=

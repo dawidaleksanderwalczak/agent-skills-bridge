@@ -63,7 +63,10 @@ skill is there but cannot be read. Until then the copies do not pass for current
 The bridge decides by file times what to copy. Each sync writes a time stamp before it looks at the
 skills, and the next sync copies every skill that holds a file changed at or after that stamp. So a
 change that arrives while a sync is running, for example while `git pull` is still writing files, is
-not lost: the next hook copies it.
+not lost: the next hook copies it. A file whose time lies ahead of the clock, as an archive or
+another machine's clock can leave it, would be newer than every stamp. The bridge puts such a time
+on record when it copies the skill, and copies the skill again only when a later time turns up or
+something else in it changes.
 
 The bridge keeps a record of its copies, and a sync puts a copy on record before it makes it. So the
 bridge never takes one of its copies for a skill of your own: not in a session that starts while
@@ -731,6 +734,8 @@ cover:
 - the way back to the branch that has the skill in `.agents/skills`, where the copy is made again;
 - a sync that finds a skill of your own and is killed, records that the scripts of before left
   unfinished, and records that were lost;
+- a skill with a file and a folder dated ahead of the clock: copied once, and again when something
+  next to them changes or one of them comes with a later time;
 - a stale lock and the off switch;
 - `status` and `clean`;
 - paths with spaces, with a letter outside ASCII, and network paths;
@@ -747,13 +752,13 @@ Results on 26 November 2026:
 
 | System | Shell | Result |
 |---|---|---|
-| Windows 11 | Git Bash (bash 5.3 as `sh`) | 304/304; Windows has no symlinks for the link cases |
-| Windows 11 | Windows PowerShell 5.1 | 301/301 |
-| Ubuntu 24.04 (WSL) | dash 0.5.12 | 287/287 |
-| Ubuntu 24.04 (WSL) | bash 5.2 as `sh` | 287/287 |
-| Ubuntu 24.04 (WSL) | zsh 5.9 as `sh` | 287/287 |
-| Ubuntu 24.04 (WSL) | zsh 5.9 as the hook shell | 289/289 |
-| Alpine 3.24 (container) | BusyBox 1.37 `ash` and tools | 233/233; no git, svn or node there |
+| Windows 11 | Git Bash (bash 5.3 as `sh`) | 313/313; Windows has no symlinks for the link cases |
+| Windows 11 | Windows PowerShell 5.1 | 310/310 |
+| Ubuntu 24.04 (WSL) | dash 0.5.12 | 296/296 |
+| Ubuntu 24.04 (WSL) | bash 5.2 as `sh` | 296/296 |
+| Ubuntu 24.04 (WSL) | zsh 5.9 as `sh` | 296/296 |
+| Ubuntu 24.04 (WSL) | zsh 5.9 as the hook shell | 298/298 |
+| Alpine 3.24 (container) | BusyBox 1.37 `ash` and tools | 242/242; no git, svn or node there |
 
 Run against the scripts as they were before the review of 25 November 2026, the tests of that review
 failed in 39 places in dash, 66 with zsh as the hook shell and 27 in Windows PowerShell. The test
@@ -790,11 +795,16 @@ the skill in `.claude/skills`, a move by hand, `clean` in both states, and a syn
 when it has just found such a skill. Against the scripts as they were until then, 40 checks fail in
 dash, with zsh as the hook shell and in Windows PowerShell, and 20 in BusyBox, which has no git and
 no svn. The two scripts were checked again on one checkout, and against each other's records of
-before, with 46 checks of their own. A sync and a `clean` of the shell script were also killed
-after every line that they pass through, 511 times in all: each time the next sync left your own
-skills where they were and finished the work. A sync still starts 7 programs to copy and 4 to
+before, with checks of their own. A sync and a `clean` of the shell script were also killed after
+every line that they pass through, 548 times in all: each time the next sync left your own skills
+where they were and finished the work. A sync still starts 7 programs to copy and 4 to
 delete, and a hook with nothing to do starts none. `docs/overview.md` says where the line runs
 between an edited copy and a skill of your own, and why.
+
+One more test followed: a skill that holds a file dated ahead of the clock. Such a skill was copied
+again at every hook, with 7 programs each time. Now a sync that copies it starts 8, and the hooks
+after it start none. Against the scripts of before, 4 of the 9 checks fail in dash, with zsh as the
+hook shell, in BusyBox and in Windows PowerShell.
 
 A manual check from cmd.exe on Windows 11 also passed, in a repository whose path has a space:
 
