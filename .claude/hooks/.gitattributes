@@ -1,0 +1,3 @@
+# sh on Linux and macOS fails on a script with CRLF line endings, so the shell scripts stay LF in
+# every checkout, whatever core.autocrlf says (Git Bash on Windows would cope with CRLF).
+*.sh text eol=lf
