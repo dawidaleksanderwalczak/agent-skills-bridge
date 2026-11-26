@@ -416,6 +416,7 @@ function Invoke-Sync {
   }
   if (-not (Enter-Lock)) { Add-Note 'Another sync was still running, so this one was skipped.'; return }
   $newStamp = "$stamp.tmp"
+  $newManifest = "$manifest.tmp"
   try {
     # The stamp of this sync is written now, before the plan looks at the skills: a file that
     # changes while the plan runs is then no older than the stamp, and the next sync copies it. The
@@ -458,20 +459,24 @@ function Invoke-Sync {
       return
     }
     $text = "# Copies made by .claude/hooks/agent-skills-bridge.sh from .agents/skills. Do not edit.`n" + (($kept | ForEach-Object { "$_`n" }) -join '')
-    $tmp = "$manifest.tmp"
-    [IO.File]::WriteAllText($tmp, $text, $utf8)
+    [IO.File]::WriteAllText($newManifest, $text, $utf8)
     # The manifest and the stamp from before the plan go into the records, the manifest first. Until
     # the manifest is there, the stamp of the sync that has begun stays, and with it the names of the
     # new copies. Should the sync stop between the two, that stamp still marks it as unfinished.
-    Move-Item -LiteralPath $tmp -Destination $manifest -Force
-    Move-Item -LiteralPath $newStamp -Destination $stamp -Force
-    # What could not be deleted or made whole must not pass for current. Without the stamp this sync
-    # counts as unfinished, and the next one makes every copy again.
-    if ($broken) { Remove-Item -LiteralPath $stamp -Force -ErrorAction SilentlyContinue }
+    Move-Item -LiteralPath $newManifest -Destination $manifest -Force
+    if (-not $broken) { Move-Item -LiteralPath $newStamp -Destination $stamp -Force }
+    else {
+      # What could not be deleted or made whole must not pass for current. So the empty stamp stays
+      # out of the records, and the stamp of the sync that has begun still marks this sync as
+      # unfinished. The scripts of before cannot read that: they go by the times of the two files.
+      # For them the stamp is deleted, now that the manifest is in place: without a stamp a sync
+      # counts as unfinished, and the next one makes every copy again.
+      Remove-Item -LiteralPath $stamp -Force -ErrorAction SilentlyContinue
+    }
   }
   finally {
-    # The waiting stamp, where the sync did not use it.
-    Remove-Item -LiteralPath $newStamp -Force -ErrorAction SilentlyContinue
+    # The waiting stamp and the manifest that was on its way, where the sync did not use them.
+    Remove-Item -LiteralPath $newStamp, $newManifest -Force -ErrorAction SilentlyContinue
     Exit-Lock
   }
 }

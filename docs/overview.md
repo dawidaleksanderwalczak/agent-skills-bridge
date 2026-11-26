@@ -335,9 +335,11 @@ They cover:
 - symlinks, junctions and link loops in a skill, links to nowhere, and a junction inside a copy;
 - a copy that cannot be replaced or deleted, and files that cannot be copied;
 - an edit that lands while a sync is running;
-- a sync that is killed: midway, after it made a new copy, and before a copy has its `.gitignore`;
+- a sync that is killed: midway, after it made a new copy, before a copy has its `.gitignore`, and
+  after it could not replace a copy;
 - a sync that cannot write its stamp, and one whose manifest does not arrive;
 - a session that starts while another sync makes a new copy;
+- what a killed sync of the PowerShell twin leaves in the records;
 - a stale lock, the kill switch, and paths with spaces, with a letter outside ASCII, and on a network
   share;
 - files saved with CRLF, read-only folders, `CDPATH`, and zsh with an alias from `.zshenv`;
@@ -352,13 +354,13 @@ They cover:
 
 | Platform | Result |
 |---|---|
-| Windows 11, Git Bash | 193 / 193 passed (Windows has no symlinks for the link cases) |
-| Windows 11, Windows PowerShell 5.1 | 187 / 187 passed |
-| Ubuntu 24.04 (WSL2), dash | 182 / 182 passed |
-| Ubuntu 24.04 (WSL2), bash 5.2 as `sh` | 182 / 182 passed |
-| Ubuntu 24.04 (WSL2), zsh 5.9 as `sh` | 182 / 182 passed |
-| Ubuntu 24.04 (WSL2), zsh 5.9 as the hook shell | 183 / 183 passed |
-| Alpine 3.24 container, BusyBox 1.37 | 163 / 163 passed (no git, svn or node in the image) |
+| Windows 11, Git Bash | 200 / 200 passed (Windows has no symlinks for the link cases) |
+| Windows 11, Windows PowerShell 5.1 | 194 / 194 passed |
+| Ubuntu 24.04 (WSL2), dash | 189 / 189 passed |
+| Ubuntu 24.04 (WSL2), bash 5.2 as `sh` | 189 / 189 passed |
+| Ubuntu 24.04 (WSL2), zsh 5.9 as `sh` | 189 / 189 passed |
+| Ubuntu 24.04 (WSL2), zsh 5.9 as the hook shell | 190 / 190 passed |
+| Alpine 3.24 container, BusyBox 1.37 | 170 / 170 passed (no git, svn or node in the image) |
 
 A case that needs something the system lacks is skipped: symlinks and file modes on Windows, junctions
 and network paths elsewhere.
@@ -508,6 +510,25 @@ change of its own, because the fix changes what the bridge records and when.
   if the scripts of before sync after a kill of the new ones, they empty the stamp, and the new copy
   is a conflict from then on.
 
+### Two smaller gaps in the records (26 November 2026)
+
+The work on the records left two smaller gaps. Both are closed, each with a test.
+
+| Finding | Fix |
+|---|---|
+| Both: a sync that could not replace or delete a copy put its manifest and the empty stamp in place, and deleted the stamp afterwards. If it was killed in between, it passed for finished, and the copy that it had left half deleted passed for current. In the shell script the gap was as wide as the start of one more program. | After such a sync the empty stamp stays out of the records, and the stamp of the sync that has begun goes on marking it as unfinished. That stamp is deleted once the manifest is in place, only for the scripts of before, which go by the times of the two files. |
+| PowerShell: the twin's lock is a file and not a folder, so it keeps its waiting stamp, and the manifest on its way, next to the records. A kill left them there, and the shell script never removed them. | The shell script deletes them with the `rm` that removes its lock, so it starts no more programs than before. The twin now also deletes the manifest on its way when it could not put it in place. |
+
+- **Tests.** One scenario holds a copy so that it cannot be replaced, and kills the sync when its
+  manifest is in place and its stamp not yet deleted. `status` must not call the copies current, and
+  the next sync must replace the copy. The other puts the twin's two files into the records and runs
+  a sync. Against the scripts of the step before, 3 of these checks fail in dash and in BusyBox, and
+  2 in Windows PowerShell 5.1, which always cleared its own two files. In dash the copy that passed
+  for current there was an empty folder.
+- **Checked again** with the scripts as they are now: the count of programs (7 and 4), the two
+  checks with real processes, and the two scripts taking over from each other. After a killed sync
+  of the twin, the shell script now leaves nothing but the manifest and the stamp in the records.
+
 ### Adoption flows
 
 | Flow | Result |
@@ -542,10 +563,9 @@ installed.
 
 These ran before the reviews, with the earlier layout, which kept the ignore rule in
 `.claude/skills/.gitignore`. The hook commands are the same today; the scripts behind them have
-changed as the two review sections, "An edit during a sync" and "A sync that is killed after a new
-copy" above describe. Claude Code's skill
-loader skips a folder without `SKILL.md` silently, so the new record folder is never taken for a
-skill (read in the 2.1.330 program).
+changed as the two review sections and the three sections after them describe, from "An edit during
+a sync" on. Claude Code's skill loader skips a folder without `SKILL.md` silently, so the new record
+folder is never taken for a skill (read in the 2.1.330 program).
 
 | Check | Result |
 |---|---|

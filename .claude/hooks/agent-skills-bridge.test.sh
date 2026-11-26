@@ -893,6 +893,58 @@ check "the first sync had made its copy when the session hook came" test "$tries
 check "the session hook does not call that copy a skill of someone's own" sh -c "! grep -q 'was not made by the bridge' '$base/second.out'"
 check "and the copy is in the manifest when both are done" grep -qx alpha "$H/.claude/skills/.agent-skills-bridge/manifest"
 
+echo "30. a sync that could not replace a copy, and is killed before it deletes its stamp"
+B=$(new_repo left-behind)
+if command -v cygpath > /dev/null 2>&1; then
+  hold() { block "$B/.claude/skills/alpha/SKILL.md"; }
+  let_go() { unblock; }
+elif [ "$(id -u)" != 0 ]; then
+  hold() { chmod 555 "$B/.claude/skills"; } # nothing in a read-only folder can be deleted
+  let_go() { chmod 755 "$B/.claude/skills"; }
+else
+  B=
+  echo "  skip (root deletes anything)"
+fi
+if [ -n "$B" ]; then
+  BS=$B/.claude/skills/.agent-skills-bridge
+  skill "$B" alpha
+  sleep 1 # see 1
+  bridge "$B" session > /dev/null
+  skill "$B" alpha "Second body."
+  : > "$base/mark"
+  sleep 1 # see 19; and the manifest of the next sync is newer than the mark, also in whole seconds
+  # The sync cannot replace the copy. It puts its manifest in place and is killed then, before it
+  # deletes the stamp. Until that moment the manifest must not make the sync look finished.
+  # shellcheck disable=SC2016
+  meanwhile "$B" 'counts as unfinished, and the next one makes every copy again.' 'kill -9 $$' 'Stop-Process -Id $PID -Force'
+  hold
+  (bridge "$B" sync) > /dev/null 2>&1
+  let_go
+  pristine "$B"
+  check "the killed sync leaves its lock behind" test -e "$BS/lock"
+  check "and had put its manifest in place" test "$BS/manifest" -nt "$base/mark"
+  st=$(bridge "$B" status 2>&1)
+  check "a sync that left a copy behind and was killed then does not pass for finished" lacks "$st" 'copies are current'
+  sleep 1 # see 25
+  touch -t 202001010000 "$BS/lock" # see 9
+  bridge "$B" sync > /dev/null 2>&1
+  check "the next sync replaces the copy" grep -q 'Second body.' "$B/.claude/skills/alpha/SKILL.md"
+  st=$(bridge "$B" status 2>&1)
+  check "then the copies are current" contains "$st" 'copies are current'
+fi
+
+echo "31. what a killed sync of the PowerShell twin leaves in the records"
+HS=$H/.claude/skills/.agent-skills-bridge
+# Its waiting stamp, and perhaps the manifest that was on its way. The shell script keeps both in its
+# lock folder. The twin's lock is a file, so it keeps them next to the records, and a kill leaves
+# them there.
+: > "$HS/stamp.tmp"
+echo 'half' > "$HS/manifest.tmp"
+skill "$H" alpha "Second body."
+bridge "$H" sync > /dev/null
+check "the next sync copies as ever" grep -q 'Second body.' "$H/.claude/skills/alpha/SKILL.md"
+check "and leaves neither of them in the records" test "$(cd "$HS" && echo .[!.]* *)" = '.gitignore manifest stamp'
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]

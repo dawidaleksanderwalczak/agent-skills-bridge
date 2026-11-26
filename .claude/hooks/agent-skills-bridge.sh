@@ -365,7 +365,10 @@ acquire_lock() {
     [ "$tries" -lt 75 ] || return 1
     sleep 0.2 2> /dev/null || sleep 1
   done
-  trap 'rm -rf "$lock"' EXIT
+  # With the lock goes what a killed sync of the PowerShell twin left in the records: its waiting
+  # stamp, and the manifest that was on its way. While this run holds the lock they are nobody's,
+  # so the lock goes last.
+  trap 'rm -rf "$stamp.tmp" "$manifest.tmp" "$lock"' EXIT
   trap 'exit 130' HUP INT TERM
   return 0
 }
@@ -456,21 +459,24 @@ do_sync() {
     rm -f "$manifest" "$stamp"
     return 0
   fi
-  # The manifest and the stamp from before the plan go into the records with one mv, the manifest
-  # first. Until the manifest is there, the stamp of the sync that has begun stays, and with it the
-  # names of the new copies. Should mv stop between the two, that stamp still marks the sync as
-  # unfinished.
-  if {
+  {
     echo '# Copies made by .claude/hooks/agent-skills-bridge.sh from .agents/skills. Do not edit.'
     for n in $kept; do echo "$n"; done
-  } > "$lock/manifest" && mv -f "$lock/manifest" "$lock/stamp" "$state/"; then
-    # What could not be deleted or made whole must not pass for current. Without the stamp this sync
+  } > "$lock/manifest" || return 0 # nothing arrives, and the stamp of the sync that has begun stays
+  if [ "$broken" = 0 ]; then
+    # The manifest and the stamp from before the plan go into the records with one mv, the manifest
+    # first. Until the manifest is there, the stamp of the sync that has begun stays, and with it the
+    # names of the new copies. Should mv stop between the two, that stamp still marks the sync as
+    # unfinished. Should mv fail, it may have moved the empty stamp all the same, so the stamp of a
+    # sync that has begun is written once more.
+    mv -f "$lock/manifest" "$lock/stamp" "$state/" || begin_sync
+  elif mv -f "$lock/manifest" "$state/"; then
+    # What could not be deleted or made whole must not pass for current. So the empty stamp stays
+    # out of the records, and the stamp of the sync that has begun still marks this sync as
+    # unfinished. The scripts of before cannot read that: they go by the times of the two files.
+    # For them the stamp is deleted, now that the manifest is in place: without a stamp a sync
     # counts as unfinished, and the next one makes every copy again.
-    [ "$broken" = 0 ] || rm -f "$stamp"
-  else
-    # The records did not arrive, so this sync must not pass for finished either. mv may have moved
-    # the empty stamp all the same, so the stamp of a sync that has begun is written once more.
-    begin_sync
+    rm -f "$stamp"
   fi
 }
 
