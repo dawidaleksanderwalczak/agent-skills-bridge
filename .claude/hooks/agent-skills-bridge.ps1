@@ -113,39 +113,63 @@ function Get-SourceNames {
   return , $names
 }
 
-# The skill names that the record file $File lists, one on a line. A last line that lacks its line
-# end counts only with $LastLine. In the manifest an editor may have left it so. In a stamp it is a
-# name that was cut short, because the sync was killed while it wrote the stamp. The file is opened
-# so that it is in nobody's way: another run may write, replace or delete it meanwhile.
-function Get-RecordNames([string]$File, [bool]$LastLine) {
-  $names = @()
-  if (-not (Test-Path -LiteralPath $File -PathType Leaf)) { return , $names }
+# On a line that begins like this, a record names the copies whose folders a sync may have left
+# half-done: see Get-BegunText.
+$unfinishedLine = '# Unfinished:'
+
+# What the record file $File says. Names: the skill names that it lists, one on a line. A last line
+# that lacks its line end counts only with $LastLine. In the manifest an editor may have left it so.
+# In a stamp it is a name that was cut short, because the sync was killed while it wrote the stamp.
+# Unfinished: the names on the record's "# Unfinished:" line. Seen: whether it has that line. Lines:
+# how many whole lines it has. The file is opened so that it is in nobody's way: another run may
+# write, replace or delete it meanwhile.
+function Read-RecordFile([string]$File, [bool]$LastLine) {
+  $record = @{ Names = @(); Unfinished = @(); Seen = $false; Lines = 0 }
+  if (-not (Test-Path -LiteralPath $File -PathType Leaf)) { return $record }
   $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
   $stream = [IO.File]::Open($File, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
   try { $lines = (New-Object IO.StreamReader -ArgumentList $stream, $utf8).ReadToEnd().Split("`n") }
   finally { $stream.Dispose() }
+  $record.Lines = $lines.Count - 1
   $count = $lines.Count
   if (-not $LastLine) { $count-- }
   for ($i = 0; $i -lt $count; $i++) {
     $line = $lines[$i].TrimEnd("`r")
+    if ($line.StartsWith($unfinishedLine, [StringComparison]::Ordinal)) {
+      $record.Seen = $true
+      foreach ($word in $line.Substring($unfinishedLine.Length).Split(' ')) {
+        if (Test-ValidName $word) { $record.Unfinished += $word }
+      }
+      continue
+    }
     if ($line -eq '' -or $line.StartsWith('#')) { continue }
-    if (Test-ValidName $line) { $names += $line }
+    if (Test-ValidName $line) { $record.Names += $line }
   }
-  return , $names
+  return $record
 }
 
-# The copies that are the bridge's. The manifest lists the copies that a finished sync made. A sync
-# that began and has not ended lists its copies in its stamp, the ones it is about to make among
-# them: those are the bridge's too, though the manifest does not list them yet.
-function Get-ManagedNames {
-  $names = Get-RecordNames $manifest $true
+# What the bridge's records say. Managed: the copies that are the bridge's. The manifest lists the
+# copies that a finished sync made. A sync that began and has not ended lists its copies in its
+# stamp, the ones it is about to make among them: those are the bridge's too, though the manifest
+# does not list them yet. Doubt: the copies whose folders a sync may have left half-done, as the
+# records name them. ManifestLine: whether the manifest has a line for them. StampForm: what the
+# stamp of a sync that has begun is like: 'new' (it has that line), 'old' (the scripts of before
+# wrote it, without the line) or 'cut' (it ends in its first line: that sync was killed before it
+# touched a folder).
+function Read-Records {
+  $listed = Read-RecordFile $manifest $true
+  $records = @{ Managed = $listed.Names; Doubt = $listed.Unfinished; ManifestLine = $listed.Seen; StampForm = '' }
   $item = Get-Item -LiteralPath $stamp -Force -ErrorAction SilentlyContinue
   if ($item -and $item.Length -gt 0) {
-    $more = @()
-    try { $more = Get-RecordNames $stamp $false } catch { } # the sync that wrote the stamp may delete it this moment
-    foreach ($n in $more) { if ($names -notcontains $n) { $names += $n } }
+    $begun = @{ Names = @(); Unfinished = @(); Seen = $false; Lines = 0 }
+    try { $begun = Read-RecordFile $stamp $false } catch { } # the sync that wrote the stamp may delete it this moment
+    foreach ($n in $begun.Names) { if ($records.Managed -notcontains $n) { $records.Managed += $n } }
+    $records.Doubt += $begun.Unfinished
+    if ($begun.Seen) { $records.StampForm = 'new' }
+    elseif ($begun.Lines -gt 0) { $records.StampForm = 'old' }
+    else { $records.StampForm = 'cut' }
   }
-  return , $names
+  return $records
 }
 
 # The bridge walks folders itself, never with -Recurse: in Windows PowerShell 5.1 -Recurse follows
@@ -290,18 +314,90 @@ function Clear-Copy([string]$Folder) {
   }
 }
 
-# Works out what to copy (Wanted), refresh (Stale), delete (Gone) and leave alone (Conflicts).
+# The first line of the .gitignore that the bridge writes into the copy of the skill $Name. By this
+# line the bridge knows a copy that it made. A kit that words the line anew must go on knowing this
+# one, or it takes every older copy for a skill of someone's own.
+function Get-MarkLine([string]$Name) {
+  return "# Copy of .agents/skills/$Name for Claude Code, made by .claude/hooks/agent-skills-bridge.sh."
+}
+
+# True when the folder .claude/skills/$Name holds the .gitignore that the bridge wrote into it. The
+# name in it may differ in letter case, as everywhere in this script: a skill that was renamed in
+# letter case only still has its copy, under the name of before.
+function Test-Marked([string]$Name) {
+  $file = Join-Path (Join-Path $dst $Name) '.gitignore'
+  $item = Get-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+  if (-not $item -or ($item -isnot [IO.FileInfo]) -or (Test-LinkItem $item)) { return $false }
+  $line = $null
+  try {
+    $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+    $stream = [IO.File]::Open($file, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+    try { $line = (New-Object IO.StreamReader -ArgumentList $stream, $utf8).ReadLine() }
+    finally { $stream.Dispose() }
+  }
+  catch { return $false }
+  return ($null -ne $line) -and $line.Equals((Get-MarkLine $Name), [StringComparison]::OrdinalIgnoreCase)
+}
+
+# True when the folder $Folder has no entry. A folder that cannot be read may hold anything.
+function Test-Bare([string]$Folder) {
+  try { return (([IO.DirectoryInfo]$Folder).GetFileSystemInfos().Count -eq 0) }
+  catch { return $false }
+}
+
+# True when the folder $Folder holds something that the bridge did not put there: a file that is
+# newer than $Mark, the time of the copy's own .gitignore, which the bridge writes last of all, or
+# a link, which no copy holds. A folder counts for nothing by itself: its time changes when a file
+# in it goes, and that leaves nothing of anyone's behind. A folder that cannot be read may hold
+# anything.
+function Test-Touched([string]$Folder, [DateTime]$Mark) {
+  try { $entries = ([IO.DirectoryInfo]$Folder).GetFileSystemInfos() }
+  catch { return $true }
+  foreach ($e in $entries) {
+    if (Test-LinkItem $e) { return $true }
+    if ($e -is [IO.DirectoryInfo]) { if (Test-Touched $e.FullName $Mark) { return $true } }
+    elseif ($e.LastWriteTimeUtc -gt $Mark) { return $true }
+  }
+  return $false
+}
+
+# True when .claude/skills/$Name is a folder that holds nothing of anyone's: no entry at all, or a
+# copy just as the bridge made it. Such a folder is in no record when the bridge took its hands off
+# it for a time (see Select-Own: git has taken its files out again), or when the records were lost.
+# The bridge makes the copy anew in its place.
+function Test-Leftover([string]$Name) {
+  $folder = Join-Path $dst $Name
+  $item = Get-Item -LiteralPath $folder -Force -ErrorAction SilentlyContinue
+  if (-not $item -or ($item -isnot [IO.DirectoryInfo]) -or (Test-LinkItem $item)) { return $false }
+  if (Test-Bare $folder) { return $true }
+  if (-not (Test-Marked $Name)) { return $false }
+  return -not (Test-Touched $folder (Get-WriteTime (Join-Path $folder '.gitignore')))
+}
+
+# Works out what to copy (Wanted), refresh (Stale), delete (Gone) and leave alone (Conflicts), and
+# which of the skills in Stale have a folder that is a leftover in no record (Adopted). Select-Own
+# fills Taken and Why.
 function Get-Plan {
-  $plan = @{ Source = (Get-SourceNames); Managed = (Get-ManagedNames); Wanted = @(); Stale = @(); Gone = @(); Conflicts = @() }
+  $records = Read-Records
+  $plan = @{
+    Source = (Get-SourceNames); Managed = $records.Managed; Doubt = $records.Doubt
+    Wanted = @(); Stale = @(); Gone = @(); Conflicts = @(); Adopted = @(); Taken = @(); Why = @{}
+  }
   $stampTime = [DateTime]::MinValue
   $manifestTime = [DateTime]::MaxValue
-  $fresh = (Test-Path -LiteralPath $stamp -PathType Leaf) -and (Test-Path -LiteralPath $manifest -PathType Leaf)
+  $stampThere = Test-Path -LiteralPath $stamp -PathType Leaf
+  $fresh = $stampThere -and (Test-Path -LiteralPath $manifest -PathType Leaf)
   if ($fresh) {
     $stampItem = Get-Item -LiteralPath $stamp -Force
     $stampTime = $stampItem.LastWriteTimeUtc
     $manifestTime = Get-WriteTime $manifest
     # The stamp of a sync that has not ended holds text, and it is newer than the manifest.
     if ($stampItem.Length -gt 0 -or $stampTime -gt $manifestTime) { $fresh = $false }
+  }
+  # Records of an unfinished sync that the scripts of before wrote do not name the folders it may
+  # have left half-done: any of them may be.
+  if (-not $fresh -and (($records.StampForm -eq 'old') -or (-not $stampThere -and -not $records.ManifestLine))) {
+    $plan.Doubt = $plan.Managed
   }
   foreach ($n in $plan.Source) {
     $copy = Join-Path $dst $n
@@ -310,11 +406,121 @@ function Get-Plan {
       if (-not $fresh -or -not (Test-Path -LiteralPath $copy -PathType Container) -or (Test-Link $copy) -or
         (Test-SourceChanged $n $stampTime) -or (Test-CopyChanged $n $manifestTime)) { $plan.Stale += $n }
     }
-    elseif (Test-Exists $copy) { $plan.Conflicts += $n }
-    else { $plan.Wanted += $n; $plan.Stale += $n }
+    elseif (-not (Test-Exists $copy)) { $plan.Wanted += $n; $plan.Stale += $n }
+    elseif (Test-Leftover $n) { $plan.Wanted += $n; $plan.Stale += $n; $plan.Adopted += $n }
+    else { $plan.Conflicts += $n }
   }
   foreach ($n in $plan.Managed) { if ($plan.Wanted -notcontains $n) { $plan.Gone += $n } }
   return $plan
+}
+
+# True when the repository folder, or a folder above it, holds the entry $Entry: .git or .svn, by
+# which a checkout of git or svn is known. git and svn are asked only where they are at home.
+function Test-Above([string]$Entry) {
+  $folder = $root
+  while ($folder) {
+    if (Test-Exists (Join-Path $folder $Entry)) { return $true }
+    $folder = [IO.Path]::GetDirectoryName($folder)
+  }
+  return $false
+}
+
+# Asks git and svn about the folders .claude/skills/<name> of $Names, with one process each for git
+# and for every folder that svn is asked about. Git and Svn: the names in whose folder they track
+# something. Untold: all the names when git is there and cannot say (it trusts the checkout no
+# longer, or its index is broken).
+function Get-Tracked([string[]]$Names) {
+  $tracked = @{ Git = @(); Svn = @(); Untold = @() }
+  if ((Test-Above '.git') -and (Get-Command git -ErrorAction SilentlyContinue)) {
+    # Letter case counts for nothing, in the question and in the answer: Windows takes a folder in
+    # another letter case for the same one.
+    $answer = Invoke-Tool git (@('-C', $root, '--icase-pathspecs', 'ls-files', '--') + @($Names | ForEach-Object { ".claude/skills/$_" }))
+    if ($answer.Code -eq 0) {
+      $out = "`n" + $answer.Out + "`n"
+      foreach ($n in $Names) {
+        # A tracked file in the folder (git puts quotes around a name with unusual letters), or the
+        # name itself: a tracked link, or a file where the folder was.
+        $p = ".claude/skills/$n"
+        foreach ($line in "`n$p/", "`n`"$p/", "`n$p`n") {
+          if ($out.IndexOf($line, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $tracked.Git += $n; break }
+        }
+      }
+    }
+    else { $tracked.Untold = $Names }
+  }
+  if ((Test-Above '.svn') -and (Get-Command svn -ErrorAction SilentlyContinue)) {
+    foreach ($n in $Names) {
+      if ((Invoke-Tool svn @('info', (Join-Path $dst $n))).Code -eq 0) { $tracked.Svn += $n }
+    }
+  }
+  return $tracked
+}
+
+# Before the bridge deletes or replaces a folder, it makes sure that the folder still is the copy
+# that it made: its records alone do not say so. Someone may have put a skill of their own in the
+# copy's place, by hand or with a git checkout of a branch that keeps the skill in .claude/skills.
+# Looks at the folders of Gone and Stale that are on record. A folder is still the bridge's copy
+# when all of this holds:
+#   - It holds the .gitignore that the bridge wrote: whoever replaces the folder replaces that file
+#     too. Only a folder that a sync may have left half-done (Doubt) can be without it.
+#   - Its skill is still in .agents/skills, or its SKILL.md is the one the bridge copied. A changed
+#     SKILL.md whose skill is gone could be restored from nowhere.
+#   - git and svn track nothing in it. They are asked only about a folder that holds a file newer
+#     than its .gitignore, or lacks that file: what a checkout writes is new, and git puts a tracked
+#     file over an ignored copy without a word.
+# Whatever else differs in a folder with that .gitignore is an edit of a copy: the bridge restores
+# it. Sets Taken to the names whose folder is no longer the bridge's copy, and takes them out of
+# Gone, Stale and Wanted: the bridge leaves these folders alone, and its next manifest does not
+# list them. Why says why, name by name.
+function Select-Own($Plan) {
+  $why = @{}
+  $ask = @()
+  $work = @($Plan.Gone) + @($Plan.Stale)
+  foreach ($n in $work) {
+    if ($Plan.Managed -notcontains $n) { continue } # a new copy: no folder is there, or a leftover
+    $folder = Join-Path $dst $n
+    $item = Get-Item -LiteralPath $folder -Force -ErrorAction SilentlyContinue
+    if (-not $item) { continue }
+    if (Test-LinkItem $item) { $ask += $n } # a link holds nothing; the bridge unlinks it unless git or svn tracks it
+    elseif ($item -isnot [IO.DirectoryInfo]) { $why[$n] = 'it is not a folder' }
+    elseif (Test-Bare $folder) { } # an empty folder is nobody's work
+    elseif (-not (Test-Marked $n)) {
+      if ($Plan.Doubt -contains $n) { $ask += $n }
+      else { $why[$n] = 'the .gitignore that the bridge wrote is not in it' }
+    }
+    else {
+      $mark = Get-WriteTime (Join-Path $folder '.gitignore')
+      if (Test-Touched $folder $mark) {
+        $skill = Get-Item -LiteralPath (Join-Path $folder 'SKILL.md') -Force -ErrorAction SilentlyContinue
+        if (($Plan.Gone -contains $n) -and ($skill -is [IO.FileInfo]) -and ($skill.LastWriteTimeUtc -gt $mark)) {
+          $why[$n] = "its SKILL.md is newer than that copy, and .agents/skills/$n is gone"
+        }
+        else { $ask += $n }
+      }
+    }
+  }
+  if ($ask.Count) {
+    $tracked = Get-Tracked $ask
+    foreach ($n in $ask) {
+      if ($tracked.Git -contains $n) { $why[$n] = 'git tracks it' }
+      elseif ($tracked.Svn -contains $n) { $why[$n] = 'svn tracks it' }
+      elseif ($tracked.Untold -contains $n) { $why[$n] = 'git could not say whether it tracks it' }
+    }
+  }
+  $Plan.Why = $why
+  $Plan.Taken = @($work | Where-Object { $why.ContainsKey($_) })
+  $Plan.Gone = @($Plan.Gone | Where-Object { -not $why.ContainsKey($_) })
+  $Plan.Stale = @($Plan.Stale | Where-Object { -not $why.ContainsKey($_) })
+  $Plan.Wanted = @($Plan.Wanted | Where-Object { -not $why.ContainsKey($_) })
+}
+
+# The text of the stamp of a sync that has begun: see Invoke-Sync. $Work names the copies that the
+# sync is about to delete or to make, $Copies every copy of the bridge. The line with $Work comes
+# first: a stamp that is cut short still has it, or names nothing at all.
+function Get-BegunText([string[]]$Work, [string[]]$Copies) {
+  return $unfinishedLine + ((@($Work) | ForEach-Object { " $_" }) -join '') + "`n" +
+  "# A sync began here and has not ended. Above: the copies that it was about to delete or to make. Below: every copy of the bridge.`n" +
+  ((@($Copies) | ForEach-Object { "$_`n" }) -join '')
 }
 
 # Deletes .claude/skills/$Name. A symlink or junction is unlinked, never followed.
@@ -337,14 +543,15 @@ function Remove-Copy([string]$Name) {
   return -not (Test-Exists $p)
 }
 
-# Writes .claude/skills/$Name/.gitignore. It makes git ignore the whole copy, whatever the rules in
-# the folders above say, so the copy needs no line in a .gitignore that someone else owns.
+# Writes .claude/skills/$Name/.gitignore, last of all that goes into the copy. It makes git ignore
+# the whole copy, whatever the rules in the folders above say, so the copy needs no line in a
+# .gitignore that someone else owns. By its first line the bridge knows the copy for its own later:
+# see Test-Marked.
 function Set-CopyIgnore([string]$Name) {
   $file = Join-Path (Join-Path $dst $Name) '.gitignore'
   $old = Get-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
   if ($old) { $old.Attributes = [IO.FileAttributes]::Normal } # a read-only or hidden .gitignore that came with the source
-  $text = "# Copy of .agents/skills/$Name for Claude Code, made by .claude/hooks/agent-skills-bridge.sh.`n" +
-  "# Git ignores the whole copy. Edit the original in .agents/skills.`n*`n"
+  $text = (Get-MarkLine $Name) + "`n# Git ignores the whole copy. Edit the original in .agents/skills.`n*`n"
   [IO.File]::WriteAllText($file, $text, $utf8)
 }
 
@@ -365,7 +572,16 @@ function Copy-Skill([string]$Name) {
     Copy-Folder $from.FullName $to ''
     if (-not (Test-Path -LiteralPath (Join-Path $to 'SKILL.md') -PathType Leaf)) { throw 'its SKILL.md cannot be read' }
     Set-CopyIgnore $Name
-    foreach ($f in @(Get-CopyFiles $to)) { $f.IsReadOnly = $true }
+    # A file keeps the time of its original. One that lies ahead of the clock would be newer than
+    # the copy's .gitignore for good, and pass for a file that someone put there: see Test-Touched.
+    $mark = Get-WriteTime (Join-Path $to '.gitignore')
+    foreach ($f in @(Get-CopyFiles $to)) {
+      if ($f.LastWriteTimeUtc -gt $mark) {
+        $f.IsReadOnly = $false
+        $f.LastWriteTimeUtc = $mark
+      }
+      $f.IsReadOnly = $true
+    }
   }
   catch {
     Add-Note "Could not copy .agents/skills/${Name}: $(Get-Reason $_)"
@@ -454,19 +670,30 @@ function Invoke-Sync {
     [IO.File]::WriteAllText($newStamp, '', $utf8)
     $plan = Get-Plan # again: a sync that held the lock may have done the work
     if (($plan.Stale.Count + $plan.Gone.Count) -eq 0) { return }
+    # No folder is deleted or replaced that is not the bridge's own copy any more.
+    Select-Own $plan
+    foreach ($n in $plan.Taken) {
+      $text = ".claude/skills/$n is no longer the copy that the bridge made ($($plan.Why[$n])). The bridge leaves it alone"
+      if ($plan.Source -contains $n) { Add-Note "$text, so .agents/skills/$n is not copied. Rename or delete one of them." }
+      else { Add-Note "$text." }
+    }
     # The stamp of a sync that has begun goes into the records. Unlike the stamp of a sync that has
     # ended, it holds text and is newer than the manifest: a sync that is killed midway counts as
     # unfinished, and the next one makes every copy again. The text names every copy that is the
     # bridge's, the ones this sync is about to make among them. So a copy is on record before it
     # exists: a sync that is killed after a new copy and before its manifest leaves nothing that the
     # next plan would take for someone's own skill.
+    # The first line names the copies that this sync is about to delete or to make. Should it be
+    # killed, their folders may be half-done, without the .gitignore by which the bridge knows its
+    # copies: the next sync does not ask them for it (see Select-Own). It asks every other folder,
+    # so what Select-Own found to be someone's own stays theirs after a kill too.
+    $work = @($plan.Gone) + @($plan.Stale)
     $new = @($plan.Stale | Where-Object { $plan.Managed -notcontains $_ })
-    $begun = "# A sync began here and has not ended. Its copies, the ones it was about to make among them:`n" +
-    ((@($plan.Managed) + $new | ForEach-Object { "$_`n" }) -join '')
+    $copies = @($plan.Managed | Where-Object { $plan.Taken -notcontains $_ }) + $new
     # No copy is made that is not on record.
-    try { [IO.File]::WriteAllText($stamp, $begun, $utf8) }
+    try { [IO.File]::WriteAllText($stamp, (Get-BegunText $work $copies), $utf8) }
     catch { Add-Note 'Could not write .claude/skills/.agent-skills-bridge/stamp, so nothing was copied.'; return }
-    $script:changed = $true
+    if ($work.Count) { $script:changed = $true }
     $broken = $false
     $kept = @()
     foreach ($n in $plan.Gone) {
@@ -477,7 +704,13 @@ function Invoke-Sync {
       }
     }
     foreach ($n in $plan.Stale) {
-      [void](Remove-Copy $n)
+      if (($plan.Managed -contains $n) -or ($plan.Adopted -contains $n)) { [void](Remove-Copy $n) }
+      elseif (Test-Exists (Join-Path $dst $n)) {
+        # No folder was there when the sync looked: someone made this one meanwhile, so it is theirs.
+        Add-Note ".claude/skills/$n exists and was not made by the bridge, so .agents/skills/$n is not copied. Rename or delete one of them."
+        $plan.Wanted = @($plan.Wanted | Where-Object { $_ -ne $n })
+        continue
+      }
       if (-not (Copy-Skill $n)) { $broken = $true }
     }
     $kept += @($plan.Wanted | Where-Object { Test-Path -LiteralPath (Join-Path $dst $_) -PathType Container })
@@ -485,7 +718,15 @@ function Invoke-Sync {
       Remove-Item -LiteralPath $manifest, $stamp -Force -ErrorAction SilentlyContinue
       return
     }
-    $text = "# Copies made by .claude/hooks/agent-skills-bridge.sh from .agents/skills. Do not edit.`n" + (($kept | ForEach-Object { "$_`n" }) -join '')
+    $text = "# Copies made by .claude/hooks/agent-skills-bridge.sh from .agents/skills. Do not edit.`n"
+    if ($broken) {
+      # What this sync could not delete or make stays on record, and its folder may have lost the
+      # bridge's .gitignore on the way. The manifest says which folders: the next sync does not ask
+      # them for that file, and asks every other one.
+      $left = @($work | Where-Object { ($kept -contains $_) -and -not (Test-Marked $_) })
+      $text += $unfinishedLine + (($left | ForEach-Object { " $_" }) -join '') + "`n"
+    }
+    $text += (($kept | ForEach-Object { "$_`n" }) -join '')
     [IO.File]::WriteAllText($newManifest, $text, $utf8)
     # The manifest and the stamp from before the plan go into the records, the manifest first. Until
     # the manifest is there, the stamp of the sync that has begun stays, and with it the names of the
@@ -561,7 +802,7 @@ function Invoke-Guard {
   if (-not $full.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) { return }
   $rest = $full.Substring($base.Length)
   $name = ($rest -split '\\', 2)[0]
-  $match = @((Get-ManagedNames) | Where-Object { $_ -eq $name }) # in parentheses: the list name by name
+  $match = @((Read-Records).Managed | Where-Object { $_ -eq $name }) # the list, name by name
   if ($match.Count -eq 0) { return }
   $sub = ''
   if ($rest.Contains('\')) { $sub = ($rest -split '\\', 2)[1] -replace '\\', '/' }
@@ -604,10 +845,15 @@ function Show-SvnStatus($Plan) {
 
 function Show-Status {
   $plan = Get-Plan
+  Select-Own $plan # as the next sync will: it may ask git or svn
+  $plan.Managed = @($plan.Managed | Where-Object { $plan.Taken -notcontains $_ })
   "agent-skills bridge: $root"
   "  .agents/skills  $($plan.Source.Count) skill(s): $($plan.Source -join ' ')"
   "  .claude/skills  $($plan.Managed.Count) copy(ies): $($plan.Managed -join ' ')"
   if ($plan.Conflicts.Count) { "  conflicts       $($plan.Conflicts -join ' ') (in .claude/skills, not made by the bridge)" }
+  foreach ($n in $plan.Taken) {
+    "  left alone      ${n}: no longer the copy that the bridge made ($($plan.Why[$n])). The next sync takes it off the records"
+  }
   if (($plan.Stale.Count + $plan.Gone.Count) -eq 0) { '  state           copies are current' }
   else {
     $gone = ''
@@ -640,7 +886,7 @@ function Show-Status {
 
 function Invoke-Clean {
   # After a first sync that was killed there is no manifest, and still there are copies.
-  $managed = Get-ManagedNames
+  $managed = (Read-Records).Managed
   if ($managed.Count -eq 0 -and -not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
     # No copies, but perhaps records: a sync that deleted the last copy leaves its folder behind.
     if ((Test-Path -LiteralPath $state -PathType Container) -and -not (Test-Exists $lock)) {
@@ -651,8 +897,16 @@ function Invoke-Clean {
   }
   if (-not (Enter-Lock)) { Write-Line 'agent-skills bridge: another sync is running; try again.' -Stderr; exit 1 }
   try {
-    $managed = Get-ManagedNames
-    $stuck = @($managed | Where-Object { -not (Remove-Copy $_) })
+    $plan = Get-Plan
+    # Every copy on record goes, current or not, but no folder that is not the bridge's copy any more.
+    $plan.Gone = @($plan.Managed | Where-Object { $plan.Source -notcontains $_ })
+    $plan.Stale = @($plan.Managed | Where-Object { $plan.Source -contains $_ })
+    Select-Own $plan
+    $mine = @($plan.Managed | Where-Object { $plan.Taken -notcontains $_ })
+    # As a sync does, clean first puts on record which folders it is about to delete. Should it be
+    # killed, or should a folder stay, the next sync knows that these may be half-deleted.
+    try { [IO.File]::WriteAllText($stamp, (Get-BegunText (@($plan.Gone) + @($plan.Stale)) $mine), $utf8) } catch { }
+    $stuck = @($mine | Where-Object { -not (Remove-Copy $_) })
   }
   finally { Exit-Lock }
   if ($stuck.Count) {
@@ -661,7 +915,11 @@ function Invoke-Clean {
     exit 1
   }
   Remove-Item -LiteralPath $state -Recurse -Force -ErrorAction SilentlyContinue # the records
-  "agent-skills bridge: deleted the copies: $($managed -join ' ')."
+  if ($mine.Count) { "agent-skills bridge: deleted the copies: $($mine -join ' ')." }
+  else { 'agent-skills bridge: no copies to delete.' }
+  foreach ($n in $plan.Taken) {
+    "agent-skills bridge: left .claude/skills/$n alone: it is no longer the copy that the bridge made ($($plan.Why[$n]))."
+  }
 }
 
 try {

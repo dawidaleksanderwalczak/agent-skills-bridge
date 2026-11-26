@@ -144,6 +144,22 @@ meanwhile() {
 }
 pristine() { cp "$here/agent-skills-bridge.sh" "$here/agent-skills-bridge.ps1" "$1/.claude/hooks/"; }
 
+# settled <description> <repo>: after a hook has dealt with something once, the next hook must find
+# nothing left to do. It must give the answer of a hook that has every program at hand, and start
+# none: see 2. Where that cannot be seen (see 2 for why), the two answers of the plain hook must match.
+quiet_ok=0
+settled() {
+  first=$(bridge "$2" session 2>&1)
+  if [ "$quiet_ok" = 1 ]; then
+    dir=$2
+    command -v cygpath > /dev/null 2>&1 && dir=$(cygpath -w "$2")
+    second=$(quiet session)
+  else
+    second=$(bridge "$2" session 2>&1)
+  fi
+  check "$1" sh -c 'case $1 in *reloadSkills* | *"not found"* | *"no longer the copy"*) exit 1 ;; esac; test "$1" = "$2"' x "$second" "$first"
+}
+
 if [ "$impl" = ps1 ]; then echo "agent-skills bridge tests (ps1 in $powershell)"; else echo "agent-skills bridge tests (sh, hooks in $hook_shell)"; fi
 
 settings=$here/../settings.json
@@ -225,6 +241,7 @@ else
   command -v cygpath > /dev/null 2>&1 && dir=$(cygpath -w "$R")
   mkdir -p "$base/zempty" # as ZDOTDIR: zsh then reads no startup file of whoever runs the tests
   quiet() { printf '%s' "${2:-}" | CLAUDE_PROJECT_DIR=$dir PATH=/nonexistent ZDOTDIR=$base/zempty "$hs" -c "$(hook_command "$1")" 2>&1; }
+  quiet_ok=1 # later sections ask the same of other states: see settled
   normal=$(bridge "$R" session)
   check "a session with nothing to do starts no program" test "$(quiet session)" = "$normal"
   check "nor does a sync" test -z "$(quiet sync '{"hook_event_name":"FileChanged","file_path":"x/.agents/skills/alpha/SKILL.md"}')"
@@ -579,12 +596,24 @@ if command -v git > /dev/null 2>&1; then
   st=$(bridge "$G" status 2>&1)
   check "status: copies are ignored" contains "$st" 'copies are ignored'
   check "status: .claude/skills is in the repository" contains "$st" '.claude/skills is in the repository'
+  # A copy that someone added to git by force. Its files are as the bridge made them, so it stays
+  # the bridge's copy, and status says that git does not ignore it.
+  gq add -f .claude/skills/alpha 2> /dev/null
+  st=$(bridge "$G" status 2>&1)
+  check "status names a copy that git tracks" contains "$st" 'not ignored: alpha'
+  gq rm -r -q --cached .claude/skills/alpha
+  st=$(bridge "$G" status 2>&1)
+  check "and no longer once git has let go of it" contains "$st" 'copies are ignored'
+  # A copy without the .gitignore that the bridge wrote is the bridge's no longer: see 36.
   sleep 1 # see 6
+  chmod u+w "$G/.claude/skills/alpha/.gitignore" 2> /dev/null
   rm -f "$G/.claude/skills/alpha/.gitignore"
   st=$(bridge "$G" status 2>&1)
-  check "status names a copy git can see" contains "$st" 'not ignored: alpha'
-  bridge "$G" sync > /dev/null
-  check "sync gives the copy its .gitignore back" grep -qx '\*' "$G/.claude/skills/alpha/.gitignore"
+  check "status says that a copy without its .gitignore is left alone" contains "$st" 'left alone      alpha: no longer the copy that the bridge made (the .gitignore that the bridge wrote is not in it)'
+  out=$(bridge "$G" session 2>&1)
+  check "the hook leaves that folder as it is, and says so" sh -c 'test -f "$1/SKILL.md" && test ! -e "$1/.gitignore" && case $2 in *".claude/skills/alpha is no longer the copy that the bridge made"*) exit 0 ;; esac; exit 1' x "$G/.claude/skills/alpha" "$out"
+  st=$(gq status --porcelain --untracked-files=all)
+  check "git lists the folder now, so nobody overlooks it" contains "$st" 'claude/skills/alpha/SKILL.md'
   # The kit in a clone that turns LF into CRLF (core.autocrlf=true, the Git for Windows default).
   git -c core.autocrlf=true clone -q "$G" "$base/clone-crlf" 2> /dev/null
   check "control: without .gitattributes an autocrlf clone gets CRLF" test "$(crs "$base/clone-crlf/.claude/hooks/agent-skills-bridge.sh")" -gt 0
@@ -630,6 +659,14 @@ if command -v svn > /dev/null 2>&1 && command -v svnadmin > /dev/null 2>&1; then
   check "svn: a native skill is added when named" sh -c "svn status '$C/.claude/skills/native' | grep -q '^A'"
   echo 'more' > "$C/.claude/skills/native/reference.md"
   check "svn: svn:ignore does not reach into a native skill" sh -c "svn status '$C/.claude/skills/native' | grep -q '^?'"
+  # A copy that someone added to svn and changed then: svn is asked as git is, see 35.
+  svn add -q "$C/.claude/skills/alpha"
+  sleep 1 # see 6
+  chmod u+w "$C/.claude/skills/alpha/SKILL.md" 2> /dev/null
+  echo 'Changed in the copy.' >> "$C/.claude/skills/alpha/SKILL.md"
+  out=$(bridge "$C" session 2>&1)
+  check "svn: a changed folder that svn tracks is left alone" grep -q 'Changed in the copy.' "$C/.claude/skills/alpha/SKILL.md"
+  check "svn: and the hook says so" contains "$out" '.claude/skills/alpha is no longer the copy that the bridge made (svn tracks it)'
 else
   echo "  skip svn cases (no svn here)"
 fi
@@ -1123,6 +1160,283 @@ check "clean deletes these copies too" sh -c 'test ! -e "$1/alpha" && test ! -e 
 check "and says which" contains "$out" 'deleted the copies: alpha beta.'
 check "and deletes the records" test ! -e "$ZS"
 check "and keeps the skill of someone's own" grep -qx mine "$Z/.claude/skills/own/SKILL.md"
+
+echo "35. git: a skill that git keeps in .claude/skills takes the place of a copy"
+if command -v git > /dev/null 2>&1; then
+  O=$(new_repo own-git)
+  OS=$O/.claude/skills/.agent-skills-bridge
+  go() { git -C "$O" -c user.name=test -c user.email=test@example.invalid -c core.autocrlf=false "$@"; }
+  go init -q
+  # The branch of before: the skill lives in .claude/skills, and git tracks it.
+  mkdir -p "$O/.claude/skills/foo"
+  echo 'The skill, where it was.' > "$O/.claude/skills/foo/SKILL.md"
+  go add -A
+  go commit -qm 'a skill in .claude/skills'
+  go branch -M old
+  # A branch that has the skill in both places.
+  go checkout -q -b both
+  skill "$O" foo 'For the other tools.'
+  go add -A
+  go commit -qm 'the skill for the other tools too'
+  # The branch of today: the skill has moved to .agents/skills, which is what the kit is for.
+  go checkout -q old
+  go checkout -q -b new
+  mkdir -p "$O/.agents/skills"
+  go mv .claude/skills/foo .agents/skills/foo
+  echo 'more' > "$O/.agents/skills/foo/reference.md"
+  mkdir -p "$O/.claude/skills"
+  echo '# The anchor.' > "$O/.claude/skills/.gitignore"
+  go add -A
+  go commit -qm 'move the skill to .agents/skills'
+  sleep 1 # see 1
+  bridge "$O" session > /dev/null
+  check "on the branch of today the skill has its copy" sh -c 'test -f "$1/reference.md" && test -f "$1/.gitignore"' x "$O/.claude/skills/foo"
+  # edited <file>: an edit that nobody has committed, in a file that git has just checked out.
+  edited() { echo 'An edit that is not committed.' >> "$1"; }
+  sleep 1 # what git checks out must be newer than the copy, also where clocks tick in whole seconds
+  go checkout -q old
+  check "git puts its file in the place of the ignored copy, without a word" writable "$O/.claude/skills/foo/SKILL.md"
+  check "and the copy's own .gitignore stays behind" grep -qx '\*' "$O/.claude/skills/foo/.gitignore"
+  edited "$O/.claude/skills/foo/SKILL.md"
+  out=$(bridge "$O" session 2>&1)
+  check "the hook leaves the tracked skill alone, with the edit that is not committed" grep -q 'not committed' "$O/.claude/skills/foo/SKILL.md"
+  check "and says so" contains "$out" '.claude/skills/foo is no longer the copy that the bridge made'
+  check "git finds the skill as that branch has it, with the edit" test "$(go status --porcelain)" = ' M .claude/skills/foo/SKILL.md'
+  check "the folder is off the bridge's records" sh -c '! grep -qx foo "$1/manifest" 2> /dev/null' x "$OS"
+  settled "the next hook has nothing to do, and starts no program" "$O"
+  # Back to the branch of today. Git takes its file out again. What is left in the folder is what
+  # the bridge had copied, and no record names it.
+  go checkout -q -- .
+  go checkout -q new
+  check "back on the branch of today, the rest of the copy is still there" sh -c 'test -f "$1/reference.md" && test ! -e "$1/SKILL.md"' x "$O/.claude/skills/foo"
+  out=$(bridge "$O" session 2>&1)
+  check "the hook takes that rest for no skill of someone's own" lacks "$out" 'was not made by the bridge'
+  check "and makes the copy again" grep -q 'where it was' "$O/.claude/skills/foo/SKILL.md"
+  check "which is on record again" grep -qx foo "$OS/manifest"
+  # An edit in a copy that git knows nothing about is still an edit of a copy: see 6.
+  sleep 1 # see 6
+  chmod u+w "$O/.claude/skills/foo/SKILL.md" 2> /dev/null
+  echo 'An edit in the copy.' >> "$O/.claude/skills/foo/SKILL.md"
+  bridge "$O" session > /dev/null 2>&1
+  check "an edited copy is still restored, where git says that it tracks nothing in it" sh -c '! grep -q "An edit in the copy." "$1"' x "$O/.claude/skills/foo/SKILL.md"
+  # The branch with the skill in both places. Its skill in .agents/skills is still there, so the
+  # folder in .claude/skills looks like a copy that someone edited. Only git can say that it is not.
+  sleep 1 # see above
+  go checkout -q both
+  edited "$O/.claude/skills/foo/SKILL.md"
+  out=$(bridge "$O" session 2>&1)
+  check "where the skill is in .agents/skills too, the tracked one is not replaced by its copy" grep -q 'not committed' "$O/.claude/skills/foo/SKILL.md"
+  check "the hook has asked git, and says so" contains "$out" '.claude/skills/foo is no longer the copy that the bridge made (git tracks it)'
+  check "and that the skill of that name is not copied" contains "$out" '.agents/skills/foo is not copied. Rename or delete one of them.'
+  out=$(bridge "$O" session 2>&1)
+  check "from then on it is a conflict like any other" contains "$out" '.claude/skills/foo exists and was not made by the bridge'
+  settled "and a hook that finds it once more starts no program" "$O"
+  # Clean, in the state of the first case: the records name a folder that holds the tracked skill.
+  go checkout -q -- .
+  go checkout -q new
+  bridge "$O" session > /dev/null 2>&1
+  sleep 1 # see above
+  go checkout -q old
+  edited "$O/.claude/skills/foo/SKILL.md"
+  out=$(bridge "$O" clean 2>&1)
+  check "clean leaves the tracked skill alone too" grep -q 'not committed' "$O/.claude/skills/foo/SKILL.md"
+  check "and says so" contains "$out" 'left .claude/skills/foo alone: it is no longer the copy that the bridge made'
+  check "it deletes its records" test ! -e "$OS"
+  # A git that cannot say what it tracks: it does not trust the checkout, or its index is broken.
+  # Then the bridge cannot make sure, and keeps its hands off a folder that someone changed.
+  go checkout -q -- .
+  go checkout -q new
+  bridge "$O" session > /dev/null 2>&1
+  sleep 1 # see 6
+  chmod u+w "$O/.claude/skills/foo/SKILL.md" 2> /dev/null
+  echo 'An edit in the copy.' >> "$O/.claude/skills/foo/SKILL.md"
+  mkdir -p "$base/nogit"
+  printf '#!/bin/sh\nexit 128\n' > "$base/nogit/git"
+  chmod +x "$base/nogit/git"
+  printf '@exit /b 128\r\n' > "$base/nogit/git.cmd" # the same for PowerShell on Windows
+  out=$( (
+    PATH=$base/nogit:$PATH
+    export PATH
+    bridge "$O" session
+  ) 2>&1)
+  check "where git cannot say what it tracks, a changed folder is left alone" grep -q 'An edit in the copy.' "$O/.claude/skills/foo/SKILL.md"
+  check "and the hook says why" contains "$out" 'git could not say whether it tracks it'
+  # Letter case: Windows and macOS take a folder in another letter case for the same one, so git's
+  # files can lie in the copy's folder under such a name. The bridge cannot tell what the file
+  # system does, so git's answer counts in any letter case.
+  chmod -R u+w "$O/.claude/skills/foo"
+  rm -rf "$O/.claude/skills/foo"
+  bridge "$O" session > /dev/null 2>&1
+  sleep 1 # see 6
+  chmod u+w "$O/.claude/skills/foo/SKILL.md" 2> /dev/null
+  echo 'An edit in the copy.' >> "$O/.claude/skills/foo/SKILL.md"
+  go update-index --add --cacheinfo "100644,$(go hash-object -w "$O/.claude/skills/foo/SKILL.md"),.claude/skills/FOO/SKILL.md"
+  out=$(bridge "$O" session 2>&1)
+  check "a folder that git tracks under a name in another letter case is left alone as well" grep -q 'An edit in the copy.' "$O/.claude/skills/foo/SKILL.md"
+  check "and the hook says that git tracks it" contains "$out" '.claude/skills/foo is no longer the copy that the bridge made (git tracks it)'
+else
+  echo "  skip git cases (no git here)"
+fi
+
+echo "36. a skill of someone's own that takes the place of a copy by hand"
+P=$(new_repo own-hand)
+PR=$P/.claude/skills/.agent-skills-bridge
+for s in alpha beta gamma delta epsilon zeta; do skill "$P" "$s"; done
+sleep 1 # see 1
+bridge "$P" session > /dev/null
+# The copy goes, and the skill moves from .agents/skills into its place: it is to be a skill for
+# Claude Code alone. No file in the folder is new, so only the missing .gitignore tells.
+chmod -R u+w "$P/.claude/skills/alpha"
+rm -rf "$P/.claude/skills/alpha"
+mv "$P/.agents/skills/alpha" "$P/.claude/skills/alpha"
+out=$(bridge "$P" session 2>&1)
+check "a skill that was moved into the place of its copy is left alone" grep -q 'Body of alpha.' "$P/.claude/skills/alpha/SKILL.md"
+check "the hook says so, and why" contains "$out" '.claude/skills/alpha is no longer the copy that the bridge made (the .gitignore that the bridge wrote is not in it)'
+check "the folder is off the bridge's records" sh -c '! grep -qx alpha "$1/manifest"' x "$PR"
+check "the copies that still are copies stay on record" grep -qx beta "$PR/manifest"
+bridge "$P" guard '{"tool_name":"Edit","tool_input":{"file_path":"'"$(tool_path "$P/.claude/skills/alpha/SKILL.md")"'"}}' > /dev/null 2>&1
+check "an edit of that skill is allowed now" test $? = 0
+settled "the next hook has nothing to say about it, and starts no program" "$P"
+# A folder of someone's own in the place of a copy whose skill is still in .agents/skills.
+sleep 1 # see 6
+chmod -R u+w "$P/.claude/skills/beta"
+rm -rf "$P/.claude/skills/beta"
+mkdir "$P/.claude/skills/beta"
+echo 'mine' > "$P/.claude/skills/beta/SKILL.md"
+out=$(bridge "$P" session 2>&1)
+check "a folder of someone's own in the place of a copy is not overwritten" grep -qx mine "$P/.claude/skills/beta/SKILL.md"
+check "the hook says that the skill of that name is not copied" contains "$out" '.agents/skills/beta is not copied. Rename or delete one of them.'
+out=$(bridge "$P" session 2>&1)
+check "from then on it is a conflict like any other" contains "$out" '.claude/skills/beta exists and was not made by the bridge'
+# A copy whose SKILL.md someone changed, and whose skill goes then: an edited copy is restored from
+# its skill (see 6), and here nothing is left to restore it from.
+sleep 1 # see 6
+chmod u+w "$P/.claude/skills/gamma/SKILL.md" 2> /dev/null
+echo 'Changed in the copy.' >> "$P/.claude/skills/gamma/SKILL.md"
+rm -rf "$P/.agents/skills/gamma"
+out=$(bridge "$P" session 2>&1)
+check "a copy with a changed SKILL.md stays when its skill is gone" grep -q 'Changed in the copy.' "$P/.claude/skills/gamma/SKILL.md"
+check "and the hook says why" contains "$out" 'its SKILL.md is newer than that copy, and .agents/skills/gamma is gone'
+# A copy that only gained a file, as a script leaves one that runs in it, is still the bridge's.
+mkdir "$P/.claude/skills/delta/__pycache__"
+echo 'x' > "$P/.claude/skills/delta/__pycache__/run.pyc"
+rm -rf "$P/.agents/skills/delta"
+out=$(bridge "$P" session 2>&1)
+check "a copy that only gained a file is deleted with its skill" test ! -e "$P/.claude/skills/delta"
+check "without a word" lacks "$out" 'no longer the copy'
+# A file in the place of a copy: git checks a link out as one where links cannot be made.
+chmod -R u+w "$P/.claude/skills/epsilon"
+rm -rf "$P/.claude/skills/epsilon"
+echo '../../.agents/skills/epsilon' > "$P/.claude/skills/epsilon"
+out=$(bridge "$P" session 2>&1)
+check "a file in the place of a copy is left alone" grep -q 'agents/skills/epsilon' "$P/.claude/skills/epsilon"
+check "and reported" contains "$out" '.claude/skills/epsilon is no longer the copy that the bridge made (it is not a folder)'
+# An empty folder is nobody's work.
+sleep 1 # see 6
+chmod -R u+w "$P/.claude/skills/zeta"
+rm -rf "$P/.claude/skills/zeta"
+mkdir "$P/.claude/skills/zeta"
+bridge "$P" session > /dev/null 2>&1
+check "an empty folder in the place of a copy gets the copy" test -f "$P/.claude/skills/zeta/SKILL.md"
+# A skill file with a time ahead of the clock, as an archive or another machine's clock leaves it.
+# The PowerShell twin gives a copy the time of its original, and this copy must not pass for one
+# that someone changed after the bridge made it.
+skill "$P" eta
+touch -t 203701010000 "$P/.agents/skills/eta/SKILL.md"
+bridge "$P" session > /dev/null 2>&1
+rm -rf "$P/.agents/skills/eta"
+out=$(bridge "$P" session 2>&1)
+check "the copy of a file with a time ahead of the clock is deleted with its skill" test ! -e "$P/.claude/skills/eta"
+check "like any other copy" lacks "$out" 'no longer the copy'
+# A skill that is renamed in letter case only, where the file system takes both names for one
+# folder. The PowerShell twin takes them for one name too, and its copy still says the name of
+# before. The shell script goes by the letter case, so the rename is another matter there.
+if [ "$impl" = ps1 ]; then
+  skill "$P" theta
+  bridge "$P" session > /dev/null 2>&1
+  mv "$P/.agents/skills/theta" "$P/.agents/skills/theta-" && mv "$P/.agents/skills/theta-" "$P/.agents/skills/Theta"
+  sleep 1 # see 1
+  skill "$P" Theta "Second body."
+  out=$(bridge "$P" session 2>&1)
+  check "the twin still knows the copy of a skill that was renamed in letter case only" grep -q 'Second body.' "$P/.claude/skills/Theta/SKILL.md"
+  check "and does not take it for a skill of someone's own" lacks "$out" 'no longer the copy'
+else
+  echo "  skip the rename in letter case only (the shell script tells such names apart)"
+fi
+
+echo "37. clean, where a skill of someone's own has taken the place of a copy"
+L=$(new_repo own-clean)
+skill "$L" alpha
+skill "$L" beta
+sleep 1 # see 1
+bridge "$L" session > /dev/null
+chmod -R u+w "$L/.claude/skills/alpha"
+rm -rf "$L/.claude/skills/alpha"
+mv "$L/.agents/skills/alpha" "$L/.claude/skills/alpha"
+out=$(bridge "$L" clean 2>&1)
+check "clean leaves a skill that was moved into the place of its copy" grep -q 'Body of alpha.' "$L/.claude/skills/alpha/SKILL.md"
+check "and says so" contains "$out" 'left .claude/skills/alpha alone: it is no longer the copy that the bridge made (the .gitignore that the bridge wrote is not in it)'
+check "it deletes the copy that still is one" test ! -e "$L/.claude/skills/beta"
+check "and says which" contains "$out" 'deleted the copies: beta.'
+check "and deletes its records" test ! -e "$L/.claude/skills/.agent-skills-bridge"
+
+echo "38. a sync that finds a skill of someone's own, and is killed"
+T=$(new_repo own-killed)
+TS=$T/.claude/skills/.agent-skills-bridge
+skill "$T" alpha
+skill "$T" beta
+sleep 1 # see 1
+bridge "$T" session > /dev/null
+chmod -R u+w "$T/.claude/skills/alpha"
+rm -rf "$T/.claude/skills/alpha"
+mv "$T/.agents/skills/alpha" "$T/.claude/skills/alpha"
+skill "$T" beta "Second body."
+# The sync sets out to take the folder off its records and to copy the other skill. The kill comes
+# when that copy is made and the manifest is not yet written. So the records still name the folder,
+# and they say that a sync did not end. After such a sync a copy may be without the bridge's
+# .gitignore: one that the sync was making. This folder is none of those, and must stay.
+# shellcheck disable=SC2016 # the bridge expands these, not the test
+meanwhile "$T" 'Copies made by' 'kill -9 $$' 'Stop-Process -Id $PID -Force'
+(bridge "$T" sync) > /dev/null 2>&1
+pristine "$T"
+check "the sync that was killed left the skill alone" grep -q 'Body of alpha.' "$T/.claude/skills/alpha/SKILL.md"
+check "its manifest was never written, so the records still name the folder" grep -qx alpha "$TS/manifest"
+sleep 1 # see 25
+touch -t 202001010000 "$TS/lock" # see 9
+out=$(bridge "$T" session 2>&1)
+check "the sync after the kill leaves the skill alone as well" grep -q 'Body of alpha.' "$T/.claude/skills/alpha/SKILL.md"
+check "and reports it" contains "$out" '.claude/skills/alpha is no longer the copy that the bridge made'
+check "and takes it off the records" sh -c '! grep -qx alpha "$1/manifest"' x "$TS"
+check "it finishes the copy that the killed sync was making" grep -q 'Second body.' "$T/.claude/skills/beta/SKILL.md"
+
+echo "39. records of before, and records that were lost"
+V=$(new_repo records-of-before)
+VS=$V/.claude/skills/.agent-skills-bridge
+skill "$V" alpha
+skill "$V" beta
+sleep 1 # see 1
+bridge "$V" session > /dev/null
+# A sync that the scripts of before left unfinished: their stamp names the copies, and no line of
+# it says which of them the sync was making. Any of them may be half-made, without its .gitignore.
+chmod u+w "$V/.claude/skills/alpha/.gitignore" 2> /dev/null
+rm -f "$V/.claude/skills/alpha/.gitignore"
+printf '%s\n' '# A sync began here and has not ended. Its copies, the ones it was about to make among them:' alpha beta > "$VS/stamp"
+out=$(bridge "$V" session 2>&1)
+check "a copy that such a sync left without its .gitignore is no skill of someone's own" lacks "$out" 'no longer the copy'
+check "the next sync makes it again" grep -qx '\*' "$V/.claude/skills/alpha/.gitignore"
+# Records that were lost: the copies are in no record, and still just as the bridge made them.
+rm -rf "$VS"
+out=$(bridge "$V" session 2>&1)
+check "copies whose records were lost are no conflict" lacks "$out" 'was not made by the bridge'
+check "and are on record again" sh -c 'grep -qx alpha "$1/manifest" && grep -qx beta "$1/manifest"' x "$VS"
+rm -rf "$VS"
+sleep 1 # see 6
+chmod u+w "$V/.claude/skills/alpha/SKILL.md" 2> /dev/null
+echo 'Changed in the copy.' >> "$V/.claude/skills/alpha/SKILL.md"
+out=$(bridge "$V" session 2>&1)
+check "a copy in no record that someone changed is a conflict" contains "$out" '.claude/skills/alpha exists and was not made by the bridge'
+check "and keeps the change" grep -q 'Changed in the copy.' "$V/.claude/skills/alpha/SKILL.md"
+check "the copy that nobody changed is the bridge's again" grep -qx beta "$VS/manifest"
 
 echo
 echo "$pass passed, $fail failed"

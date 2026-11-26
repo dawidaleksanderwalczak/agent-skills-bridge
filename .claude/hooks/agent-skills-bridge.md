@@ -42,9 +42,11 @@ version control and never committed. Nobody has to install or run anything.
    nothing.
 
 The bridge never writes through a link and never touches a skill in `.claude/skills` that it did not
-create. It reports such a name as a conflict. When nothing changed, a hook run starts no process
-beyond the shell Claude Code opens for it. That matters on Windows, where security software can make
-each process cost most of a second.
+create. It reports such a name as a conflict. Before it deletes or replaces a folder, it makes sure
+that the folder is still the copy it made, and no skill of your own that has taken the copy's place:
+see [Copies and skills of your own](#copies-and-skills-of-your-own). When nothing changed, a hook
+run starts no process beyond the shell Claude Code opens for it. That matters on Windows, where
+security software can make each process cost most of a second.
 
 Links inside a skill (symlinks, and junctions on Windows) are followed, so a copy holds plain files
 and folders. What cannot be copied is left out and reported: a link to nowhere, a link loop, a file
@@ -68,6 +70,72 @@ bridge never takes one of its copies for a skill of your own: not in a session t
 another sync is still copying, and not after a sync that was killed midway, because the hook's two
 minutes were over or because someone closed Claude Code. A killed sync counts as unfinished. The
 next sync makes every copy again, and deletes the copy of a skill that is gone by then.
+
+## Copies and skills of your own
+
+`.claude/skills` can hold skills of your own next to the copies. The bridge leaves them alone, also
+when one of them takes the place of a copy. That happens in two ways:
+
+- **With git.** One branch still keeps a skill in `.claude/skills`, and another has moved it to
+  `.agents/skills`. When you switch to the first branch, git puts its tracked files over the copy
+  without a word, because git may overwrite what it ignores.
+- **By hand.** You delete a copy and put a folder of your own in its place. For example, a skill is
+  to be for Claude Code alone, and you move it from `.agents/skills` to `.claude/skills`.
+
+So the bridge's records are not enough to tell. Before the bridge deletes or replaces a folder, it
+makes sure that the folder is still its copy. That is so while all of this holds:
+
+1. The bridge's records name the folder.
+2. The folder holds the `.gitignore` that the bridge wrote into it. Whoever replaces the folder
+   replaces that file too.
+3. The folder's skill is still in `.agents/skills`, or its `SKILL.md` is as the bridge copied it.
+4. git and svn track no file in it. The bridge asks them only about a folder that holds a file
+   newer than that `.gitignore`, which it writes last. Whatever a checkout writes is new.
+
+If one of them fails, the bridge leaves the folder as it is, says so once, and takes it off its
+records. The message starts with "`.claude/skills/<name>` is no longer the copy that the bridge
+made" and gives the reason. From then on the folder is a skill of your own. If `.agents/skills` has
+a skill of that name, you get the usual conflict message at each session start.
+
+Everything else is an edit of a copy. When someone changes, adds or deletes a file in a folder that
+passes all four, the bridge restores the copy from `.agents/skills` at the next sync, and deletes
+it once its skill is gone. The line runs there for these reasons:
+
+- A copy is generated and read-only, and the guard sends every edit to the original. A change
+  inside it is a slip, and the original is there to undo it from.
+- When the original is gone and the copy's `SKILL.md` has changed, that text exists nowhere else.
+  The bridge can restore nothing then, so it deletes nothing. A file that only turned up next to
+  it, such as the `__pycache__` of a script that ran in the copy, does not keep the copy alive.
+- A file that git or svn tracks is somebody's committed work. The `.gitignore` cannot say so,
+  because git leaves it where it was when it puts its own files into the folder.
+
+What this means in practice:
+
+- **To make a skill Claude-only,** delete its copy in `.claude/skills` and move the skill there from
+  `.agents/skills`. The bridge reports once that the folder is no longer its copy.
+- **Switching branches needs nothing.** On the branch that keeps the skill in `.claude/skills`, the
+  bridge leaves it alone. Back on the other branch, git takes its files out again. What is left is
+  the rest of the old copy, which nobody changed, and the bridge makes the copy again in its place.
+- **In a folder that the bridge left to git,** the copy's `.gitignore` stays behind, and so do the
+  files of the copy that this branch does not have. Git ignores them, and every new file you put
+  there. If you work in that folder, delete that `.gitignore` first.
+- **A copy without the bridge's `.gitignore`** is no longer a copy. If you delete that file, you
+  take the folder over, and git lists it from then on.
+- **`clean` follows the same rule.** It deletes the copies and leaves such a folder alone.
+
+The bridge can only be as sure as these signs are:
+
+- It asks git and svn only where the hook's shell finds them. Where it cannot ask, a tracked skill
+  is still safe when its skill is gone from `.agents/skills`, as on a branch from before the move.
+  A branch that has the skill in both places needs git.
+- It compares file times. A file that someone puts into a copy with an older time (`cp -p`, a
+  Windows copy, `tar`, `rsync -a`) does not count as new. Nor does one written in the very second
+  in which the copy was made, where the shell compares whole seconds: bash 3.2 on macOS, BusyBox.
+- After a sync that was killed, the copies it was about to delete or to make may be without their
+  `.gitignore`, so the next sync does not ask them for it. A folder that you create under such a
+  name before that next sync, and that git does not track, is replaced.
+- Until the next sync has looked, the guard still takes the folder for a copy and refuses Claude's
+  edits in it.
 
 ## Files
 
@@ -122,6 +190,7 @@ record folder. Here is what to do about what you already have:
 | Your own skills in `.claude/skills` | Nothing in git: the copies ignore only themselves, so git still sees every file of your own skills. In svn, add a new skill folder by name (see the svn section). |
 | A `.claude/skills/.gitignore` with your own rules | Keep it, and don't copy the anchor. The bridge never edits that file and needs no line in it. |
 | A skill in `.claude/skills` with the same name as one in `.agents/skills` | The bridge reports a conflict and leaves both alone. Delete the old one once `.agents/skills` has it, or rename one. |
+| A branch that still keeps a skill in `.claude/skills`, while another has moved it to `.agents/skills` | Nothing. When you switch to that branch, the bridge leaves the tracked skill alone and says so once. When you switch back, it makes the copy again. See [Copies and skills of your own](#copies-and-skills-of-your-own). |
 | `.claude/skills` as a link to `.agents/skills` (the usual hand-made workaround) | The bridge leaves a link alone and says so in each new session. Delete the link to let the bridge take over. |
 | `settings.local.json`, `.claude/worktrees`, `.claude/commands` and so on | Nothing: the bridge doesn't touch them. |
 | A root `.gitignore` that ignores `.claude/` | Git can't see the kit. Change the rule as shown below. |
@@ -227,7 +296,8 @@ the bridge.
   `powershell -NoProfile -ExecutionPolicy Bypass -File .claude\hooks\agent-skills-bridge.ps1 status`.
   It takes the same commands, and given the script's full path it works from any folder.
 - `sync` copies right away. After a manual sync, type `/reload-skills` in Claude Code.
-- `clean` deletes every copy and the record folder. The anchor stays.
+- `clean` deletes every copy and the record folder. The anchor stays, and so does a folder that is
+  no longer the bridge's copy: `clean` names it.
 - `AGENT_SKILLS_BRIDGE=off` in the environment turns the hooks into no-ops.
 
 ## Manual test
@@ -505,7 +575,7 @@ sh .claude/hooks/agent-skills-bridge.sh sync
 | Check 3: the copy didn't change | The file watcher can't see the folder, for example in WSL on `/mnt/c` or on a network drive. | Run `sync`, then type `/reload-skills`. On such a drive, start a new session after each change. |
 | Check 3: the copy changed, but Claude answered `version 1` | Claude Code missed the change. | Type `/reload-skills`, then `/bridge-check`. |
 | Check 4: Claude edited the copy | The guard hooks are missing, or were added after the session started. | Check the `hooks` line in `status`, then start a new session. |
-| Check 5: a line contains `.claude/skills` | The copy isn't ignored. | Run `status`: it says why. Run `sync`. In svn, set `svn:ignore` as described in the svn section. |
+| Check 5: a line contains `.claude/skills` | The copy isn't ignored. | Run `status`: it says why, and [Troubleshooting](#troubleshooting) has its lines. In svn, set `svn:ignore` as described in the svn section. |
 | Check 6: the copy stays | As for check 3. | Run `sync`. |
 
 ## What the other tools see
@@ -546,14 +616,17 @@ Cursor staff on its forum. The record folder has no `SKILL.md`, so no tool loads
 |---|---|
 | A skill is missing in Claude Code | Run `status`. For a brand-new checkout, accept the folder trust prompt: hooks run only in trusted folders. |
 | "Blocked by the agent-skills bridge" | Claude tried to edit a copy. It edits the named source file instead. |
-| "`.claude/skills/<name>` exists and was not made by the bridge" | A skill of the same name lives in `.claude/skills`. Move it to `.agents/skills`, or rename one of them. If the folder is no skill of yours but a copy that a kit from before 26 November 2026 left behind when its sync was killed, delete the folder: the next hook copies the skill. |
+| "`.claude/skills/<name>` exists and was not made by the bridge" | A skill of the same name lives in `.claude/skills`. Move it to `.agents/skills`, or rename one of them. If the folder is no skill of yours but half a copy that a kit from before 26 November 2026 left behind when its sync was killed, delete the folder: the next hook copies the skill. A whole copy that is in no record is no conflict: the bridge takes it back by itself. |
+| "`.claude/skills/<name>` is no longer the copy that the bridge made" | A skill of your own has taken the place of a copy, and the bridge leaves it alone: see [Copies and skills of your own](#copies-and-skills-of-your-own). The message gives the reason. "git tracks it" or "svn tracks it": the folder belongs to the branch you are on. "Its `SKILL.md` is newer than that copy, and `.agents/skills/<name>` is gone": someone changed the file, or a checkout wrote it, and that text exists nowhere else, so it stays. "The `.gitignore` that the bridge wrote is not in it": someone replaced the folder, or deleted that file. "It is not a folder": a file has the copy's name. "git could not say whether it tracks it": git failed in this checkout, so run `git status` to see why. If you want the copy back, delete the folder: the next hook copies the skill. If you want the folder, there is nothing to do, unless `.agents/skills` has a skill of that name: then rename or delete one of them. |
 | "Could not replace `.claude/skills/<name>`; is a file in it open?", or "Could not delete the old copy" | A program holds a file of the copy open; on Windows that blocks deleting it. Close the file. The next hook tries again, and so does `sync`. Until then `status` reports the copies as out of date. |
 | "Not everything in `.agents/skills` could be copied" | A skill holds a link to nowhere, a link loop or a file that you may not read. The rest of the skill is copied. Repair or remove that entry. For a file that could not be read, every hook tries again until it can be; a link to nowhere and a link loop are left out for good. |
 | "Skipped a folder in `.agents/skills`" | A skill folder has a name with a space or another character outside letters, digits, `.`, `_` and `-`. Rename it. The bridge says so once per session. |
 | "Could not copy `.agents/skills/<name>`" | Its `SKILL.md` could not be read. The PowerShell twin also says so when the skill's folders are nested more than 16 deep, which it takes for a link loop. No copy is left behind, and every hook tries again. |
+| "Could not write `.claude/skills/<name>/.gitignore`, so `.agents/skills/<name>` is not copied" | The bridge knows its copies by that file, so it makes no copy without it. A program holds the file open, or the disk is full. No copy is left behind, and every hook tries again. The PowerShell twin reports this as "Could not copy", with the reason. |
 | "Could not write `.claude/skills/.agent-skills-bridge/stamp`, so nothing was copied" | The bridge puts a copy on record before it makes it, and it could not write that record. The file is read-only, or a program holds it open. Free the file. The next hook tries again, and so does `sync`. |
 | `clean`: "could not delete: `<name>`" | As above: a file in that copy is open. The records stay, so close the file and run `clean` again. |
-| `status`: "git not ignored: `<name>`" | The copy lost its `.gitignore`, or someone committed it. Run `sync`. If git tracks the copy, run `git rm -r --cached .claude/skills/<name>`. |
+| `status`: "git not ignored: `<name>`" | Someone added the copy to git. Run `git rm -r --cached .claude/skills/<name>`. A copy that lost its `.gitignore` is not listed here: `status` lists it as "left alone", because it is no longer a copy. |
+| `status`: "left alone `<name>`: no longer the copy that the bridge made" | As for the message of the same words above. `status` shows it before the next sync takes the folder off the records. |
 | `status`: "svn not ignored", or `svn status` lists copies | Set `svn:ignore` to `*` on `.claude/skills` (see the svn section). |
 | Linux or macOS: the hook fails with `$'\r'`, `: not found` or "Illegal option -", and Claude cannot write any file | The script has CRLF line endings. A shell ends with status 2 on such a script, which Claude Code reads as the guard's refusal, so every Write is refused until this is repaired. Commit `.claude/hooks/.gitattributes` (git) or set `svn:eol-style LF` (svn), then check the file out again. |
 | Windows: `sh` "is not recognized" in cmd or PowerShell | `sh` is usually on PATH only inside Git Bash. Use the PowerShell twin (see "Everyday use"), or open Git Bash. The hooks are not affected: Claude Code finds Git Bash itself. |
@@ -636,14 +709,23 @@ cover:
 - what a killed sync of the PowerShell twin leaves in the records;
 - `clean` after a first sync that left no manifest, because it was killed or because its manifest
   did not arrive;
+- a skill of your own that takes the place of a copy: put there by git, when you check out a branch
+  that tracks it in `.claude/skills`, or moved there by hand, each with `sync` and with `clean`;
+- the cases next to it: a branch that has the skill in both places, a git that cannot answer, a
+  folder that git tracks under a name in another letter case, a copy whose `SKILL.md` was changed
+  before its skill went, a copy that only gained a file, and a file or an empty folder in the place
+  of a copy;
+- the way back to the branch that has the skill in `.agents/skills`, where the copy is made again;
+- a sync that finds a skill of your own and is killed, records that the scripts of before left
+  unfinished, and records that were lost;
 - a stale lock and the off switch;
 - `status` and `clean`;
 - paths with spaces, with a letter outside ASCII, and network paths;
 - files saved with CRLF, read-only folders, `CDPATH`, and zsh with an alias and an option from
   `.zshenv`;
-- in git: an existing `.claude/skills` with its own skill and `.gitignore`, and a clone with
-  `core.autocrlf=true`;
-- in svn: `svn:ignore` and a skill of your own.
+- in git: an existing `.claude/skills` with its own skill and `.gitignore`, a copy that someone
+  added to git, a copy that lost its `.gitignore`, and a clone with `core.autocrlf=true`;
+- in svn: `svn:ignore`, a skill of your own, and a changed copy that someone added to svn.
 
 A case that needs something the system lacks is skipped, and the test says so: symlinks and file
 modes on Windows, junctions and network paths elsewhere, git, svn or node where they are missing.
@@ -652,13 +734,13 @@ Results on 26 November 2026:
 
 | System | Shell | Result |
 |---|---|---|
-| Windows 11 | Git Bash (bash 5.3 as `sh`) | 230/230; Windows has no symlinks for the link cases |
-| Windows 11 | Windows PowerShell 5.1 | 225/225 |
-| Ubuntu 24.04 (WSL) | dash 0.5.12 | 213/213 |
-| Ubuntu 24.04 (WSL) | bash 5.2 as `sh` | 213/213 |
-| Ubuntu 24.04 (WSL) | zsh 5.9 as `sh` | 213/213 |
-| Ubuntu 24.04 (WSL) | zsh 5.9 as the hook shell | 215/215 |
-| Alpine 3.24 (container) | BusyBox 1.37 `ash` and tools | 193/193; no git, svn or node there |
+| Windows 11 | Git Bash (bash 5.3 as `sh`) | 296/296; Windows has no symlinks for the link cases |
+| Windows 11 | Windows PowerShell 5.1 | 293/293 |
+| Ubuntu 24.04 (WSL) | dash 0.5.12 | 279/279 |
+| Ubuntu 24.04 (WSL) | bash 5.2 as `sh` | 279/279 |
+| Ubuntu 24.04 (WSL) | zsh 5.9 as `sh` | 279/279 |
+| Ubuntu 24.04 (WSL) | zsh 5.9 as the hook shell | 281/281 |
+| Alpine 3.24 (container) | BusyBox 1.37 `ash` and tools | 229/229; no git, svn or node there |
 
 Run against the scripts as they were before the review of 25 November 2026, the tests of that review
 failed in 39 places in dash, 66 with zsh as the hook shell and 27 in Windows PowerShell. The test
@@ -690,6 +772,15 @@ begins. When the two were brought together, one more test came: `clean` after a 
 left no manifest. Against the scripts of the second review alone, 5 of its 12 checks fail, and 6
 against the scripts from before both. The numbers are the same in all seven environments above.
 
+The tests for a skill of your own in the place of a copy came the same day: a branch that tracks
+the skill in `.claude/skills`, a move by hand, `clean` in both states, and a sync that is killed
+when it has just found such a skill. Against the scripts as they were until then, 37 checks fail in
+dash, with zsh as the hook shell and in Windows PowerShell, and 18 in BusyBox, which has no git and
+no svn. The two scripts were checked again on one checkout, and against each other's records of
+before, with 46 checks of their own. A sync still starts 7 programs to copy and 4 to delete, and a
+hook with nothing to do starts none. `docs/overview.md` says where the line runs between an edited
+copy and a skill of your own, and why.
+
 A manual check from cmd.exe on Windows 11 also passed, in a repository whose path has a space:
 
 - the PowerShell twin's `sync`, `status` and `clean`, from the repository and from another folder;
@@ -716,8 +807,9 @@ The hooks were also checked live in Claude Code 2.1.330 (Claude desktop on Windo
 repositories, with the previous layout. That layout kept the ignore rule in `.claude/skills/.gitignore`.
 The hook commands are the same today. The scripts have changed since, in the review of 25 November
 2026: how they walk folders, read the guard's event and report a sync that could not finish. A day
-later the time stamp of a sync moved to before its look at the skills, and a sync began to put its
-copies on record before it makes them.
+later the time stamp of a sync moved to before its look at the skills, a sync began to put its
+copies on record before it makes them, and the bridge began to make sure that a folder is still its
+copy before it deletes or replaces it.
 
 - **Session start.** The skill was in Claude's list from the first prompt. The first sync took 6.8 s
   on a machine where security software makes each process start cost most of a second. A sync with

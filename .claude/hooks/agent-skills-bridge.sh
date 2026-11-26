@@ -61,6 +61,8 @@ stamp=$state/stamp
 lock=$state/lock
 notes=
 changed=0
+nl='
+'
 
 note() { notes="${notes}${notes:+ }$*"; }
 
@@ -188,16 +190,39 @@ scan_source() {
   done
 }
 
+# On a line that begins like this, a record names the copies whose folders a sync may have left
+# half-done: see begin_sync.
+unfinished_line='# Unfinished:'
+
 # Sets names to the skill names that the record file $1 lists, one on a line. A last line that lacks
 # its line end counts only when $2 is 1. In the manifest an editor may have left it so. In a stamp
-# it is a name that was cut short, because the sync was killed while it wrote the stamp.
+# it is a name that was cut short, because the sync was killed while it wrote the stamp. Sets
+# unfinished to the names on the record's "# Unfinished:" line, seen to 1 when it has that line, and
+# lines to the number of lines it took in.
 read_names() {
   names=
+  unfinished=
+  seen=0
+  lines=0
   [ -f "$1" ] || return 0
   {
     while IFS= read -r line || { [ "$2" = 1 ] && [ -n "$line" ]; }; do
+      lines=$((lines + 1))
       line=${line%[[:cntrl:]]} # the carriage return of a record that someone saved with CRLF
-      case $line in '' | '#'*) continue ;; esac
+      case $line in
+        "$unfinished_line"*)
+          seen=1
+          rest=${line#"$unfinished_line"}
+          rest="$rest "
+          while [ -n "$rest" ]; do
+            u=${rest%% *}
+            rest=${rest#* }
+            if valid_name "$u"; then unfinished="$unfinished $u"; fi
+          done
+          continue
+          ;;
+        '' | '#'*) continue ;;
+      esac
       if valid_name "$line"; then names="$names $line"; fi
     done < "$1"
   } 2> /dev/null # the sync that wrote a stamp may delete it this moment
@@ -206,12 +231,21 @@ read_names() {
 # Sets managed to the copies that are the bridge's. The manifest lists the copies that a finished
 # sync made. A sync that began and has not ended lists its copies in its stamp, the ones it is about
 # to make among them: those are the bridge's too, though the manifest does not list them yet.
+# Sets doubt to the copies whose folders a sync may have left half-done, as the records name them,
+# mline to 1 when the manifest has a line for them, and sform to what the stamp of a sync that has
+# begun is like: new (it has that line), old (the scripts of before wrote it, without the line) or
+# cut (it ends in its first line: that sync was killed before it touched a folder).
 read_manifest() {
   read_names "$manifest" 1
   managed=$names
+  doubt=$unfinished
+  mline=$seen
+  sform=
   [ -s "$stamp" ] || return 0
   read_names "$stamp" 0
   for u in $names; do has "$managed" "$u" || managed="$managed $u"; done
+  doubt="$doubt $unfinished"
+  if [ "$seen" = 1 ]; then sform=new; elif [ "$lines" -gt 0 ]; then sform=old; else sform=cut; fi
 }
 
 # True when $1, or anything under it, changed at or after the stamp (taken when the last sync began).
@@ -246,7 +280,62 @@ copy_changed() {
   return 1
 }
 
-# Sets wanted (skills to copy), stale (copies to refresh), gone (copies to delete) and conflicts.
+# Sets mark to the first line of the .gitignore that the bridge writes into the copy of skill $1. By
+# this line the bridge knows a copy that it made. A kit that words the line anew must go on knowing
+# this one, or it takes every older copy for a skill of someone's own.
+mark_line() {
+  mark="# Copy of .agents/skills/$1 for Claude Code, made by .claude/hooks/agent-skills-bridge.sh."
+}
+
+# True when the folder .claude/skills/$1 holds the .gitignore that the bridge wrote into it.
+marked() {
+  f=$dst/$1/.gitignore
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  line=
+  { IFS= read -r line < "$f"; } 2> /dev/null
+  line=${line%[[:cntrl:]]} # see read_names
+  mark_line "$1"
+  [ "$line" = "$mark" ]
+}
+
+# True when the folder $1 has no entry. A folder that cannot be read may hold anything.
+bare() {
+  [ -r "$1" ] || return 1
+  for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+    if [ -e "$e" ] || [ -L "$e" ]; then return 1; fi
+  done
+  return 0
+}
+
+# True when the folder $1 holds something that the bridge did not put there: a file that is newer
+# than $2, the copy's own .gitignore, which the bridge writes last of all, or a link, which no copy
+# holds. A folder counts for nothing by itself: its time changes when a file in it goes, and that
+# leaves nothing of anyone's behind. A folder that cannot be read may hold anything.
+touched() {
+  [ -r "$1" ] || return 0
+  for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+    if [ -L "$e" ]; then return 0; fi
+    if [ -d "$e" ]; then
+      if touched "$e" "$2"; then return 0; fi
+    elif [ -e "$e" ] && [ "$e" -nt "$2" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# True when .claude/skills/$1 is a folder that holds nothing of anyone's: no entry at all, or a copy
+# just as the bridge made it. Such a folder is in no record when the bridge took its hands off it
+# for a time (see own: git has taken its files out again), or when the records were lost. The
+# bridge makes the copy anew in its place.
+leftover() {
+  [ -d "$dst/$1" ] && [ ! -L "$dst/$1" ] || return 1
+  bare "$dst/$1" && return 0
+  marked "$1" && ! touched "$dst/$1" "$dst/$1/.gitignore"
+}
+
+# Sets wanted (skills to copy), stale (copies to refresh), gone (copies to delete), conflicts, and
+# adopted (the skills among stale whose folder is a leftover in no record).
 plan() {
   scan_source
   read_manifest
@@ -254,22 +343,185 @@ plan() {
   stale=
   gone=
   conflicts=
+  adopted=
   fresh=1 # the last sync finished, so the stamp can be trusted
   # The stamp of a sync that has not ended holds text, and it is newer than the manifest.
   if [ ! -f "$stamp" ] || [ ! -f "$manifest" ] || [ -s "$stamp" ] || [ "$stamp" -nt "$manifest" ]; then fresh=0; fi
+  # Records of an unfinished sync that the scripts of before wrote do not name the folders it may
+  # have left half-done: any of them may be.
+  if [ "$fresh" = 0 ] && { [ "$sform" = old ] || { [ ! -f "$stamp" ] && [ "$mline" = 0 ]; }; }; then
+    doubt=$managed
+  fi
   for n in $src_names; do
     if has "$managed" "$n"; then
       wanted="$wanted $n"
       if [ "$fresh" = 0 ] || [ ! -d "$dst/$n" ] || [ -L "$dst/$n" ] ||
         src_changed "$src/$n" || copy_changed "$dst/$n"; then stale="$stale $n"; fi
     elif [ -e "$dst/$n" ] || [ -L "$dst/$n" ]; then
-      conflicts="$conflicts $n"
+      if leftover "$n"; then
+        wanted="$wanted $n"
+        stale="$stale $n"
+        adopted="$adopted $n"
+      else
+        conflicts="$conflicts $n"
+      fi
     else
       wanted="$wanted $n"
       stale="$stale $n"
     fi
   done
   for n in $managed; do has "$wanted" "$n" || gone="$gone $n"; done
+}
+
+# Sets rest to the words of the list $1 that the list $2 does not hold.
+without() {
+  rest=
+  for w in $1; do has "$2" "$w" || rest="$rest $w"; done
+}
+
+# True when the folder the shell is in, or a folder above it, holds the entry $1: .git or .svn, by
+# which a checkout of git or svn is known. No process: git and svn are asked only where they are at
+# home.
+above() {
+  d=$PWD
+  while :; do
+    [ ! -e "${d%/}/$1" ] || return 0
+    case $d in
+      //*/*/*) d=${d%/*} ;; # a network path: not above its share, where a look can take long
+      //*) return 1 ;;
+      */*) d=${d%/*} ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
+# Asks git and svn about the folders .claude/skills/<name> of the names in the arguments, with one
+# process each for git and for every folder that svn is asked about. Sets in_git and in_svn to the
+# names in whose folder they track something, and no_git to all the names when git is there and
+# cannot say (it trusts the checkout no longer, or its index is broken).
+ask_vcs() {
+  in_git=
+  in_svn=
+  no_git=
+  if above .git && command -v git > /dev/null 2>&1; then
+    paths=
+    for m in "$@"; do paths="$paths $dst/$m"; done
+    # Letter case counts for nothing, in the question and in the answer: Windows and macOS take a
+    # folder in another letter case for the same one, and the bridge cannot tell what the file
+    # system here does (see do_guard).
+    # shellcheck disable=SC2086 # relative paths built from validated names
+    if out=$(git --icase-pathspecs ls-files -- $paths 2> /dev/null); then
+      if [ -n "$out" ]; then
+        lower "$out"
+        out="$nl$l$nl"
+        lower "$*"
+        lows=$l
+        for m in "$@"; do
+          low=${lows%% *}
+          lows=${lows#* }
+          # A tracked file in the folder (git puts quotes around a name with unusual letters), or
+          # the name itself: a tracked link, or a file where the folder was.
+          case $out in *"$nl$dst/$low/"* | *"$nl\"$dst/$low/"* | *"$nl$dst/$low$nl"*) in_git="$in_git $m" ;; esac
+        done
+      fi
+    else
+      no_git="$*"
+    fi
+  fi
+  if above .svn && command -v svn > /dev/null 2>&1; then
+    for m in "$@"; do
+      if svn info "$dst/$m" > /dev/null 2>&1; then in_svn="$in_svn $m"; fi
+    done
+  fi
+}
+
+# Before the bridge deletes or replaces a folder, it makes sure that the folder still is the copy
+# that it made: its records alone do not say so. Someone may have put a skill of their own in the
+# copy's place, by hand or with a git checkout of a branch that keeps the skill in .claude/skills.
+# Looks at the folders of $gone and $stale that are on record. A folder is still the bridge's copy
+# when all of this holds:
+#   - It holds the .gitignore that the bridge wrote: whoever replaces the folder replaces that file
+#     too. Only a folder that a sync may have left half-done ($doubt) can be without it.
+#   - Its skill is still in .agents/skills, or its SKILL.md is the one the bridge copied. A changed
+#     SKILL.md whose skill is gone could be restored from nowhere.
+#   - git and svn track nothing in it. They are asked only about a folder that holds a file newer
+#     than its .gitignore, or lacks that file: what a checkout writes is new, and git puts a tracked
+#     file over an ignored copy without a word.
+# Whatever else differs in a folder with that .gitignore is an edit of a copy: the bridge restores
+# it. Sets taken to the names whose folder is no longer the bridge's copy, and takes them out of
+# $gone, $stale and $wanted: the bridge leaves these folders alone, and its next manifest does not
+# list them. reason says why.
+own() {
+  taken=
+  why_file=
+  why_mark=
+  why_skill=
+  why_git=
+  why_svn=
+  why_ask=
+  ask=
+  for n in $gone $stale; do
+    has "$managed" "$n" || continue # a new copy: no folder is there, or a leftover
+    c=$dst/$n
+    if [ -L "$c" ]; then
+      ask="$ask $n" # a link holds nothing; the bridge unlinks it unless git or svn tracks it
+    elif [ ! -e "$c" ]; then
+      :
+    elif [ ! -d "$c" ]; then
+      why_file="$why_file $n"
+    elif bare "$c"; then
+      : # an empty folder is nobody's work
+    elif ! marked "$n"; then
+      if has "$doubt" "$n"; then ask="$ask $n"; else why_mark="$why_mark $n"; fi
+    elif touched "$c" "$c/.gitignore"; then
+      if has "$gone" "$n" && [ -f "$c/SKILL.md" ] && [ "$c/SKILL.md" -nt "$c/.gitignore" ]; then
+        why_skill="$why_skill $n"
+      else
+        ask="$ask $n"
+      fi
+    fi
+  done
+  if [ -n "$ask" ]; then
+    # shellcheck disable=SC2086 # validated names
+    ask_vcs $ask
+    for n in $ask; do
+      if has "$in_git" "$n"; then
+        why_git="$why_git $n"
+      elif has "$in_svn" "$n"; then
+        why_svn="$why_svn $n"
+      elif has "$no_git" "$n"; then
+        why_ask="$why_ask $n"
+      fi
+    done
+  fi
+  whys="$why_file$why_mark$why_skill$why_git$why_svn$why_ask"
+  [ -n "$whys" ] || return 0
+  for n in $gone $stale; do
+    if has "$whys" "$n"; then taken="$taken $n"; fi
+  done
+  without "$gone" "$taken"
+  gone=$rest
+  without "$stale" "$taken"
+  stale=$rest
+  without "$wanted" "$taken"
+  wanted=$rest
+}
+
+# Sets why to the reason for which own took .claude/skills/$1 for a folder that is not the bridge's.
+reason() {
+  if has "$why_file" "$1"; then
+    why='it is not a folder'
+  elif has "$why_mark" "$1"; then
+    why='the .gitignore that the bridge wrote is not in it'
+  elif has "$why_skill" "$1"; then
+    why="its SKILL.md is newer than that copy, and .agents/skills/$1 is gone"
+  elif has "$why_git" "$1"; then
+    why='git tracks it'
+  elif has "$why_svn" "$1"; then
+    why='svn tracks it'
+  else
+    why='git could not say whether it tracks it'
+  fi
 }
 
 # Deletes the copies .claude/skills/<name> for every name in the arguments, with one process for all
@@ -297,18 +549,20 @@ remove_copies() {
 }
 
 # The .gitignore of the copy of skill $1: it makes git ignore the whole copy, whatever the rules
-# in the folders above say, so the copy needs no line in a .gitignore that someone else owns.
+# in the folders above say, so the copy needs no line in a .gitignore that someone else owns. By its
+# first line the bridge knows the copy for its own later: see marked.
 copy_ignore_text() {
-  printf '%s\n' "# Copy of .agents/skills/$1 for Claude Code, made by .claude/hooks/agent-skills-bridge.sh." \
-    '# Git ignores the whole copy. Edit the original in .agents/skills.' '*'
+  mark_line "$1"
+  printf '%s\n' "$mark" '# Git ignores the whole copy. Edit the original in .agents/skills.' '*'
 }
 
+# Writes that file, last of all that goes into the copy of skill $1. Fails when it cannot.
 ignore_copy() {
   f=$dst/$1/.gitignore
   { copy_ignore_text "$1" > "$f"; } 2> /dev/null && return 0
   chmod u+w "$dst/$1" 2> /dev/null # a skill folder that is read-only in the source
   rm -f "$f"                       # a read-only .gitignore that came with the source
-  { copy_ignore_text "$1" > "$f"; } 2> /dev/null || note "Could not write $f, so git may list that copy."
+  { copy_ignore_text "$1" > "$f"; } 2> /dev/null
 }
 
 # True when every file and folder in the folder $1 has its counterpart in the copy $2. A link to
@@ -330,11 +584,16 @@ copy_whole() {
 copy_skills() {
   from=
   for n in ${1+"$@"}; do
-    if [ -e "$dst/$n" ] || [ -L "$dst/$n" ]; then
+    if [ ! -e "$dst/$n" ] && [ ! -L "$dst/$n" ]; then
+      from="$from $src/$n"
+    elif has "$managed" "$n" || has "$adopted" "$n"; then
       note "Could not replace .claude/skills/$n; is a file in it open?"
       broken=1
     else
-      from="$from $src/$n"
+      # No folder was there when the sync looked: someone made this one meanwhile, so it is theirs.
+      note ".claude/skills/$n exists and was not made by the bridge, so .agents/skills/$n is not copied. Rename or delete one of them."
+      without "$wanted" "$n"
+      wanted=$rest
     fi
   done
   partial=0
@@ -346,14 +605,18 @@ copy_skills() {
   halves=
   for n in ${1+"$@"}; do
     case " $from " in *" $src/$n "*) ;; *) continue ;; esac
-    if [ -f "$dst/$n/SKILL.md" ]; then
-      # A copy that lacks a file which is there to copy is not whole: the next sync tries again.
-      [ "$partial" = 0 ] || copy_whole "$src/$n" "$dst/$n" || broken=1
-      ignore_copy "$n"
-      made="$made $dst/$n"
-    else
+    if [ ! -f "$dst/$n/SKILL.md" ]; then
       note "Could not copy .agents/skills/$n."
       halves="$halves $n"
+    elif ! ignore_copy "$n"; then
+      # No copy without the bridge's .gitignore: git would list it, and the next sync would take it
+      # for a skill of someone's own.
+      note "Could not write .claude/skills/$n/.gitignore, so .agents/skills/$n is not copied."
+      halves="$halves $n"
+    else
+      # A copy that lacks a file which is there to copy is not whole: the next sync tries again.
+      [ "$partial" = 0 ] || copy_whole "$src/$n" "$dst/$n" || broken=1
+      made="$made $dst/$n"
     fi
   done
   # shellcheck disable=SC2086
@@ -395,13 +658,20 @@ acquire_lock() {
 # bridge's, the ones this sync is about to make among them. So a copy is on record before it exists:
 # a sync that is killed after a new copy and before its manifest leaves nothing that the next plan
 # would take for someone's own skill.
+# The first line names the copies that this sync is about to delete or to make. Should it be killed,
+# their folders may be half-done, without the .gitignore by which the bridge knows its copies: the
+# next sync does not ask them for it (see own). It asks every other folder, so what own found to be
+# someone's own stays theirs after a kill too. The line comes first: a stamp that is cut short
+# still has it, or names nothing at all.
 begin_sync() {
   new=
   for n in $stale; do has "$managed" "$n" || new="$new $n"; done
+  without "$managed" "$taken"
   # shellcheck disable=SC2086 # validated names
   {
-    printf '%s\n' '# A sync began here and has not ended. Its copies, the ones it was about to make among them:' \
-      $managed $new > "$stamp"
+    printf '%s\n' "$unfinished_line$gone$stale" \
+      '# A sync began here and has not ended. Above: the copies that it was about to delete or to make. Below: every copy of the bridge.' \
+      $rest $new > "$stamp"
   } 2> /dev/null
 }
 
@@ -453,15 +723,31 @@ do_sync() {
   : > "$lock/stamp"
   plan # again: a sync that held the lock may have done the work
   [ -n "$stale$gone" ] || return 0
+  # No folder is deleted or replaced that is not the bridge's own copy any more.
+  own
+  for n in $taken; do
+    reason "$n"
+    if has "$src_names" "$n"; then
+      note ".claude/skills/$n is no longer the copy that the bridge made ($why). The bridge leaves it alone, so .agents/skills/$n is not copied. Rename or delete one of them."
+    else
+      note ".claude/skills/$n is no longer the copy that the bridge made ($why). The bridge leaves it alone."
+    fi
+  done
   # No copy is made that is not on record.
   begin_sync || {
     note "Could not write $stamp, so nothing was copied."
     return 0
   }
-  changed=1
+  [ -z "$stale$gone" ] || changed=1
   broken=0
+  # Only what was a copy or a leftover when the sync looked is deleted. A folder that turns up under
+  # the name of a new copy meanwhile is someone's own: copy_skills finds it there and leaves it.
+  redo=
+  for n in $stale; do
+    if has "$managed" "$n" || has "$adopted" "$n"; then redo="$redo $n"; fi
+  done
   # shellcheck disable=SC2086 # validated names
-  remove_copies $gone $stale
+  remove_copies $gone $redo
   kept=
   for n in $gone; do
     if [ -e "$dst/$n" ] || [ -L "$dst/$n" ]; then
@@ -477,8 +763,18 @@ do_sync() {
     rm -f "$manifest" "$stamp"
     return 0
   fi
+  # What this sync could not delete or make stays on record, and its folder may have lost the
+  # bridge's .gitignore on the way. The manifest says which folders: the next sync does not ask
+  # them for that file, and asks every other one.
+  left=
+  if [ "$broken" = 1 ]; then
+    for n in $gone $stale; do
+      if has "$kept" "$n" && ! marked "$n"; then left="$left $n"; fi
+    done
+  fi
   {
     echo '# Copies made by .claude/hooks/agent-skills-bridge.sh from .agents/skills. Do not edit.'
+    [ "$broken" = 0 ] || echo "$unfinished_line$left"
     for n in $kept; do echo "$n"; done
   } > "$lock/manifest" || return 0 # nothing arrives, and the stamp of the sync that has begun stays
   if [ "$broken" = 0 ]; then
@@ -633,6 +929,9 @@ svn_status() {
 
 do_status() {
   plan
+  own # as the next sync will: it may ask git or svn
+  without "$managed" "$taken"
+  managed=$rest
   echo "agent-skills bridge: $PWD"
   # shellcheck disable=SC2086 # names are validated words
   set -- $src_names
@@ -641,6 +940,10 @@ do_status() {
   set -- $managed
   echo "  .claude/skills  $# copy(ies):$managed"
   [ -z "$conflicts" ] || echo "  conflicts      $conflicts (in .claude/skills, not made by the bridge)"
+  for n in $taken; do
+    reason "$n"
+    echo "  left alone      $n: no longer the copy that the bridge made ($why). The next sync takes it off the records"
+  done
   if [ -z "$stale$gone" ]; then
     echo "  state           copies are current"
   else
@@ -674,11 +977,24 @@ do_clean() {
     echo "agent-skills bridge: another sync is running; try again." >&2
     exit 1
   }
-  read_manifest
+  plan
+  # Every copy on record goes, current or not, but no folder that is not the bridge's copy any more.
+  gone=
+  stale=
+  for n in $managed; do
+    if has "$src_names" "$n"; then stale="$stale $n"; else gone="$gone $n"; fi
+  done
+  own
+  # As a sync does, clean first puts on record which folders it is about to delete. Should it be
+  # killed, or should a folder stay, the next sync knows that these may be half-deleted.
+  begin_sync
   # shellcheck disable=SC2086 # validated names
-  remove_copies $managed
+  remove_copies $gone $stale
+  mine=
   stuck=
   for n in $managed; do
+    has "$taken" "$n" && continue
+    mine="$mine $n"
     if [ -e "$dst/$n" ] || [ -L "$dst/$n" ]; then stuck="$stuck $n"; fi
   done
   if [ -n "$stuck" ]; then
@@ -687,7 +1003,15 @@ do_clean() {
     exit 1
   fi
   rm -rf "$state" # the records, the lock included
-  echo "agent-skills bridge: deleted the copies:$managed."
+  if [ -n "$mine" ]; then
+    echo "agent-skills bridge: deleted the copies:$mine."
+  else
+    echo "agent-skills bridge: no copies to delete."
+  fi
+  for n in $taken; do
+    reason "$n"
+    echo "agent-skills bridge: left .claude/skills/$n alone: it is no longer the copy that the bridge made ($why)."
+  done
 }
 
 case $cmd in
