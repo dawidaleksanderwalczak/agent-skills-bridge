@@ -2,8 +2,8 @@
 
 ## 1. Summary
 
-Each repository should have one set of project-specific Agent Skills that every AI coding tool on
-every developer machine can use. The tool-neutral place for them is `.agents/skills/<name>/SKILL.md`.
+Each repository may have one set of project-specific Agent Skills that every AI coding tool on
+every developer machine can use. The tool-neutral place for them is `.agents/skills/`.
 Codex, GitHub Copilot, Cursor, JetBrains Junie and OpenCode read that folder directly. **Claude Code
 does not.** It loads project skills only from `.claude/skills`. That was checked in the Claude Code
 2.1.330 program, and no release note up to 2.1.332 changes it. The feature request,
@@ -29,7 +29,7 @@ settings, hooks and Claude-only skills stay as they are.
   - Alpine: BusyBox.
 - The tests include git and svn repositories that already have a `.claude` folder.
 - The hooks were observed working in live Claude Code 2.1.330 sessions.
-- A check from cmd.exe confirmed that Claude Code never runs hooks in cmd, and that the kit works for
+- A check from `cmd.exe` confirmed that Claude Code never runs hooks in cmd, and that the kit works for
   people who work in cmd.
 
 ---
@@ -120,7 +120,7 @@ flowchart LR
 ### 4.3 One hook command for every shell
 
 Claude Code runs hooks in `/bin/sh` on macOS and Linux, and in Git Bash on Windows. On Windows
-without Git Bash it runs them in PowerShell. It never runs them in cmd.exe, and it chooses the shell
+without Git Bash it runs them in PowerShell. It never runs them in `cmd.exe`, and it chooses the shell
 itself, so the terminal someone starts it from doesn't matter. Every hook therefore uses a single
 command that is valid in both shell families:
 
@@ -138,10 +138,10 @@ set \' ; test -r "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.sh" || e
 - **cmd.exe.** A hook's `shell` setting accepts only `bash` and `powershell`, and
   `CLAUDE_CODE_SHELL` and `CLAUDE_CODE_GIT_BASH_PATH` accept only bash, zsh or sh. Claude Code looks
   for Git Bash in `CLAUDE_CODE_GIT_BASH_PATH`, then in the standard Git folders, then in the Git
-  installation of the `git` on PATH (read in the 2.1.330 program).
+  installation of the `git` on PATH.
 - **Tested** the way Claude Code spawns each shell, including stdin, exit code 2 and paths with
   spaces. The shells: Git Bash, Windows PowerShell 5.1, dash, bash and zsh as `sh`, zsh under its own
-  name, and BusyBox `ash`. The hook commands were also run from cmd.exe (section 8).
+  name, and BusyBox `ash`. The hook commands were also run from `cmd.exe` (section 8).
 
 ### 4.4 Safety properties
 
@@ -505,8 +505,8 @@ These findings are open. They are older than both reviews, and each needs a deci
 ### cmd.exe check (25 November 2026)
 
 A follow-up question was whether the kit also works for people who use cmd. The Claude Code program
-shows that hooks never run in cmd.exe, so the terminal doesn't matter (section 4.3). A manual check
-from cmd.exe on Windows 11, in a repository whose path has a space, covered the rest:
+shows that hooks never run in `cmd.exe`, so the terminal doesn't matter (section 4.3). A manual check
+from `cmd.exe` on Windows 11, in a repository whose path has a space, covered the rest:
 
 | Check | Result |
 |---|---|
@@ -527,7 +527,7 @@ These ran before the reviews, with the earlier layout, which kept the ignore rul
 `.claude/skills/.gitignore`. The hook commands are the same today; the scripts behind them have
 changed as the two review sections and "An edit during a sync" above describe. Claude Code's skill
 loader skips a folder without `SKILL.md` silently, so the new record folder is never taken for a
-skill (read in the 2.1.330 program).
+skill.
 
 | Check | Result |
 |---|---|
