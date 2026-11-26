@@ -21,9 +21,10 @@
 # agent-skills-bridge.ps1 does the same job where Claude Code runs hooks in PowerShell (Windows
 # without Git Bash). Keep both in step.
 
-# zsh, when a hook shell is one: split words and leave unmatched globs alone, as sh does, and
-# expand no aliases (zsh reads ~/.zshenv, and with it any alias, even for a hook).
-[ -z "${ZSH_VERSION:-}" ] || { emulate sh && unsetopt aliases; }
+# zsh, when a hook shell is one: split words and leave unmatched globs alone, as sh does. zsh reads
+# ~/.zshenv even for a hook, so every option goes back to its sh default (-R), and no alias is
+# expanded.
+[ -z "${ZSH_VERSION:-}" ] || { emulate -R sh && unsetopt aliases; }
 set -u
 CDPATH= # or cd could go somewhere else, and print where
 
@@ -175,17 +176,15 @@ json_blanks() {
   while :; do case $q in [[:space:]]*) q=${q#?} ;; *) return 0 ;; esac; done
 }
 
-# Sets src_names to the folders in .agents/skills that hold a SKILL.md.
+# Sets src_names to the folders in .agents/skills that hold a SKILL.md, and skipped to 1 when one of
+# them has a name the bridge cannot use.
 scan_source() {
   src_names=
+  skipped=0
   for s in "$src"/*; do
     [ -f "$s/SKILL.md" ] || continue
     n=${s##*/}
-    if valid_name "$n"; then
-      src_names="$src_names $n"
-    else
-      note "Skipped a folder in .agents/skills: skill folder names may only use letters, digits, '.', '_' and '-'."
-    fi
+    if valid_name "$n"; then src_names="$src_names $n"; else skipped=1; fi
   done
 }
 
@@ -296,6 +295,19 @@ ignore_copy() {
   { copy_ignore_text "$1" > "$f"; } 2> /dev/null || note "Could not write $f, so git may list that copy."
 }
 
+# True when every file and folder in the folder $1 has its counterpart in the copy $2. A link to
+# nowhere has none and needs none. A link to a folder is not looked at: cp leaves a link loop out,
+# and that is how it should be.
+copy_whole() {
+  for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+    [ -e "$e" ] || continue
+    if [ -d "$e" ] && [ -L "$e" ]; then continue; fi
+    [ -e "$2/${e##*/}" ] || return 1
+    [ ! -d "$e" ] || copy_whole "$e" "$2/${e##*/}" || return 1
+  done
+  return 0
+}
+
 # Copies .agents/skills/<name> to .claude/skills/<name> for every name in the arguments whose old
 # copy is gone, gives each copy its .gitignore, then makes the copies read-only. Three processes,
 # however many skills. Sets broken=1 when it leaves a copy behind that is not whole.
@@ -309,14 +321,18 @@ copy_skills() {
       from="$from $src/$n"
     fi
   done
+  partial=0
   # shellcheck disable=SC2086
-  [ -z "$from" ] || cp -R -L $from "$dst/" 2> /dev/null ||
+  [ -z "$from" ] || cp -R -L $from "$dst/" 2> /dev/null || partial=1
+  [ "$partial" = 0 ] ||
     note "Not everything in .agents/skills could be copied: look for a broken link, a link loop or a file that cannot be read."
   made=
   halves=
   for n in ${1+"$@"}; do
     case " $from " in *" $src/$n "*) ;; *) continue ;; esac
     if [ -f "$dst/$n/SKILL.md" ]; then
+      # A copy that lacks a file which is there to copy is not whole: the next sync tries again.
+      [ "$partial" = 0 ] || copy_whole "$src/$n" "$dst/$n" || broken=1
       ignore_copy "$n"
       made="$made $dst/$n"
     else
@@ -365,6 +381,8 @@ do_sync() {
   fi
   plan
   if [ "$loud" = 1 ]; then
+    [ "$skipped" = 0 ] ||
+      note "Skipped a folder in .agents/skills: skill folder names may only use letters, digits, '.', '_' and '-'."
     for n in $conflicts; do
       note ".claude/skills/$n exists and was not made by the bridge, so .agents/skills/$n is not copied. Rename or delete one of them."
     done
@@ -487,7 +505,14 @@ do_guard() {
       lfp=$l
       lower "$base"
       case $lfp in "$l"/*) ;; *) return 0 ;; esac
-      rest=${lfp#"$l"/}
+      # The rest in the event's own spelling, for the message: the path without as many characters
+      # as the repository's folder for copies has.
+      q=$base/
+      rest=$fp
+      while [ -n "$q" ]; do
+        q=${q#?}
+        rest=${rest#?}
+      done
       ;;
   esac
   n=${rest%%/*}
@@ -592,6 +617,8 @@ do_status() {
 
 do_clean() {
   [ -f "$manifest" ] || {
+    # No copies, but perhaps records: a sync that deleted the last copy leaves its folder behind.
+    [ ! -d "$state" ] || [ -e "$lock" ] || rm -rf "$state"
     echo "agent-skills bridge: no copies to delete."
     return 0
   }

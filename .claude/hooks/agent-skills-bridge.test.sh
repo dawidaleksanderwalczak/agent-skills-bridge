@@ -16,7 +16,16 @@ hook_shell=${ASB_TEST_SHELL:-sh}
 powershell=${ASB_TEST_POWERSHELL:-powershell.exe}
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 base=$(mktemp -d "${TMPDIR:-/tmp}/agent-skills-bridge-test.XXXXXX")
-trap 'chmod -R u+w "$base" 2>/dev/null; rm -rf "$base"' EXIT
+blocker=
+# After a signal too: dash and BusyBox ash run an EXIT trap only when the shell exits by itself.
+cleanup() {
+  rm -f "$base/blocking" # lets a file holder go; see block
+  [ -z "$blocker" ] || wait "$blocker" 2> /dev/null
+  chmod -R u+w "$base" 2> /dev/null
+  rm -rf "$base"
+}
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
 pass=0
 fail=0
 
@@ -46,7 +55,7 @@ crs() { tr -cd '\r' < "$1" | wc -c | tr -d ' '; }
 # The hook command from .claude/settings.json, for one bridge command. The same string runs in
 # POSIX sh and in PowerShell; see agent-skills-bridge.md.
 hook_command() {
-  printf '%s' "set \\' ; ASB_CMD=$1 . \"\$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.sh\" ; exit ; #' ; & \"\$env:CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.ps1\" $1 ; exit \$LASTEXITCODE"
+  printf '%s' "set \\' ; test -r \"\$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.sh\" || exit 0 ; ASB_CMD=$1 . \"\$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.sh\" ; exit ; #' ; & \"\$env:CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.ps1\" $1 ; exit \$LASTEXITCODE"
 }
 
 # bridge <repo> <command> [stdin]: run the implementation under test the way Claude Code does:
@@ -100,10 +109,14 @@ guarded() {
 }
 
 # block <file> keeps a file open the way an editor or a virus scanner does on Windows, so that
-# nobody else can read, replace or delete it; unblock lets it go.
+# nobody else can read, replace or delete it; unblock lets it go. The holder gets its paths through
+# the environment, so that no letter in them can end a quoted string, and gives up by itself after
+# five minutes, should nobody ever let it go.
 block() {
   : > "$base/blocking"
-  powershell.exe -NoProfile -NonInteractive -Command "\$f = [IO.File]::Open('$(cygpath -w "$1")', 'Open', 'Read', 'None'); [IO.File]::WriteAllText('$(cygpath -w "$base/blocked")', ''); while (Test-Path -LiteralPath '$(cygpath -w "$base/blocking")') { Start-Sleep -Milliseconds 100 }; \$f.Close()" &
+  # shellcheck disable=SC2016 # PowerShell expands these
+  ASB_HELD=$(cygpath -w "$1") ASB_BLOCKED=$(cygpath -w "$base/blocked") ASB_BLOCKING=$(cygpath -w "$base/blocking") \
+    powershell.exe -NoProfile -NonInteractive -Command '$f = [IO.File]::Open($env:ASB_HELD, "Open", "Read", "None"); [IO.File]::WriteAllText($env:ASB_BLOCKED, ""); for ($i = 0; $i -lt 3000 -and (Test-Path -LiteralPath $env:ASB_BLOCKING); $i++) { Start-Sleep -Milliseconds 100 }; $f.Close()' &
   blocker=$!
   tries=0
   while [ ! -e "$base/blocked" ] && [ "$tries" -lt 60 ]; do
@@ -114,6 +127,7 @@ block() {
 unblock() {
   rm -f "$base/blocking"
   wait "$blocker" 2> /dev/null
+  blocker=
   rm -f "$base/blocked"
 }
 
@@ -147,14 +161,21 @@ if [ -f "$settings" ]; then
     echo "  skip the JSON syntax check (no node here)"
   fi
   # A hook's "if" holds one rule, and an Edit rule filters only the Edit tool: the guard of every
-  # other editing tool has to run unfiltered.
-  check "settings.json: only the guard of Edit runs through a filter" awk '
-    /"matcher"[ \t]*:/ { edit = ($0 ~ /"matcher"[ \t]*:[ \t]*"Edit"/) }
-    /"if"[ \t]*:/ { if (!edit) bad = 1 }
-    END { exit bad }' "$settings"
-  for t in Edit MultiEdit Write NotebookEdit; do
-    check "settings.json: $t is guarded" grep -Eq "\"matcher\": \"([A-Za-z|]+\\|)?$t(\\|[A-Za-z|]+)?\"" "$settings"
-  done
+  # other editing tool has to run unfiltered. Each entry is read as a pair: its matcher names the
+  # tools, and its own command must be the guard.
+  check "settings.json: each editing tool runs the guard, and only Edit through its filter" awk '
+    /"matcher"[ \t]*:/ { m = $0; sub(/.*"matcher"[ \t]*:[ \t]*"/, "", m); sub(/".*/, "", m) }
+    /"if"[ \t]*:/ { if (m != "Edit" || !index($0, "\"if\": \"Edit(**/.claude/skills/**)\"")) bad = 1 }
+    /"command"[ \t]*:/ && m != "" {
+      if (index($0, "ASB_CMD=guard . ") && index($0, ".ps1\\\" guard ;")) {
+        n = split(m, tool, "|")
+        for (i = 1; i <= n; i++) guarded[tool[i]] = 1
+      }
+    }
+    END {
+      if (!guarded["Edit"] || !guarded["MultiEdit"] || !guarded["Write"] || !guarded["NotebookEdit"]) bad = 1
+      exit bad
+    }' "$settings"
   check ".gitattributes keeps the shell scripts LF" grep -qx '\*\.sh text eol=lf' "$here/.gitattributes"
   check "the anchor ignores nothing" sh -c "! grep -v '^#' '$here/../skills/.gitignore' | grep -q ."
 fi
@@ -189,10 +210,12 @@ check "still watches .agents/skills" contains "$out" 'watchPaths'
 out=$(bridge "$R" sync)
 check "sync prints nothing when current" test -z "$out"
 
+err=$(bridge "$R" guard '{"tool_name":"Edit","tool_input":{"file_path":"'"$(tool_path "$R/.claude/skills/beta/SKILL.md")"'"}}' 2>&1)
+check "with two copies, a refusal names the one that was meant" sh -c 'case $1 in *alpha*) exit 1 ;; *".agents/skills/beta/SKILL.md instead"*) exit 0 ;; esac; exit 1' x "$err"
 guarded "a folder named like two copies is no copy" '{"tool_name":"Edit","tool_input":{"file_path":"'"$(tool_path "$R")$js.claude${js}skills${js}alpha beta${js}SKILL.md"'"}}' 0
 hs=$(command -v "$hook_shell")
 if [ "$impl" != sh ]; then
-  :
+  echo "  skip the no-program checks (PowerShell is a program to start anyway)"
 elif command -v cygpath > /dev/null 2>&1 && [ -z "$("$hs" -c 'echo "${BASH_VERSION:-}"')" ]; then
   echo "  skip the no-program checks (on Windows only bash turns backslashes into slashes by itself)"
 else
@@ -200,7 +223,8 @@ else
   # that leads nowhere shows it: the answer is the same, with no "not found" in it.
   dir=$R
   command -v cygpath > /dev/null 2>&1 && dir=$(cygpath -w "$R")
-  quiet() { printf '%s' "${2:-}" | CLAUDE_PROJECT_DIR=$dir PATH=/nonexistent "$hs" -c "$(hook_command "$1")" 2>&1; }
+  mkdir -p "$base/zempty" # as ZDOTDIR: zsh then reads no startup file of whoever runs the tests
+  quiet() { printf '%s' "${2:-}" | CLAUDE_PROJECT_DIR=$dir PATH=/nonexistent ZDOTDIR=$base/zempty "$hs" -c "$(hook_command "$1")" 2>&1; }
   normal=$(bridge "$R" session)
   check "a session with nothing to do starts no program" test "$(quiet session)" = "$normal"
   check "nor does a sync" test -z "$(quiet sync '{"hook_event_name":"FileChanged","file_path":"x/.agents/skills/alpha/SKILL.md"}')"
@@ -264,10 +288,11 @@ check "edit of a skill the bridge did not make allowed" test $? = 0
 bridge "$R" guard '{"tool_name":"Write","tool_input":{"file_path":"'"$src_md"'","content":"see \"file_path\":\"'"$copy_md"'\""}}' > /dev/null 2>&1
 check "path quoted inside content does not trigger" test $? = 0
 up=$(printf '%s' "$copy_md" | tr '[:lower:]' '[:upper:]')
-bridge "$R" guard '{"tool_name":"Edit","tool_input":{"file_path":"'"$up"'"}}' > /dev/null 2>&1
-code=$?
+guarded "other letter case refused, on every system" '{"tool_name":"Edit","tool_input":{"file_path":"'"$up"'"}}'
+upr=$(printf '%s' "$(tool_path "$R")" | tr '[:lower:]' '[:upper:]')
+err=$(bridge "$R" guard '{"tool_name":"Write","tool_input":{"file_path":"'"$upr$js.claude${js}skills${js}alpha${js}Refs${js}Deep.MD"'","content":"x"}}' 2>&1)
+check "a refusal in another letter case keeps the event's spelling of the file" contains "$err" '.agents/skills/alpha/Refs/Deep.MD instead'
 if command -v cygpath > /dev/null 2>&1; then
-  check "other letter case refused on Windows" test "$code" = 2
   lowdrive=$(printf '%s' "$copy_md" | sed 's/^\(.\)/\L\1/')
   err=$(bridge "$R" guard '{"tool_name":"Write","tool_input":{"file_path":"'"$lowdrive"'","content":"x"}}' 2>&1)
   code=$?
@@ -297,9 +322,13 @@ guarded "path quoted inside content before the real one does not trigger" '{"too
 guarded "relative path with .. after a folder refused" '{"cwd":"'"$jr"'","tool_name":"Edit","tool_input":{"file_path":"sub/../.claude/skills/alpha/SKILL.md"}}'
 guarded "relative path that climbs two folders refused" '{"cwd":"'"$jr$js.agents${js}skills"'","tool_name":"Edit","tool_input":{"file_path":"../../.claude/skills/alpha/SKILL.md"}}'
 guarded "skill folder in another letter case refused" '{"tool_name":"Edit","tool_input":{"file_path":"'"$jr$js.claude${js}skills${js}ALPHA${js}SKILL.md"'"}}'
+guarded "relative path that climbs out of the repository allowed" '{"cwd":"'"$jr"'","tool_name":"Edit","tool_input":{"file_path":"../.claude/skills/alpha/SKILL.md"}}' 0
+guarded "a value that reads like the key is skipped" '{"tool_name":"Edit","tool_input":{"old_string":"file_path","file_path":"'"$copy_md"'"}}'
 if command -v cygpath > /dev/null 2>&1; then
   guarded "path with forward slashes refused" '{"tool_name":"Edit","tool_input":{"file_path":"'"$(cygpath -m "$R")"'/.claude/skills/alpha/SKILL.md"}}'
   guarded "Git Bash path (/c/...) refused" '{"tool_name":"Edit","tool_input":{"file_path":"'"$(cygpath -m "$R" | sed 's|^\(.\):|/\L\1|')"'/.claude/skills/alpha/SKILL.md"}}'
+else
+  echo "  skip the Windows spellings of a path (no drive letters here)"
 fi
 
 echo "8. symlinks and links"
@@ -332,6 +361,11 @@ if [ "$impl" = sh ] && ln -s "$R/.agents/skills/alpha" "$base/linktest" 2> /dev/
   bridge "$R" sync > /dev/null 2>&1
   check "a link loop does not hang the sync" test $(($(date +%s) - started)) -lt 30
   check "a link loop leaves the skill itself copied" test -f "$R/.claude/skills/alpha/SKILL.md"
+  if cp --help 2>&1 | grep -q BusyBox; then
+    echo "  skip the runaway check (BusyBox cp follows a link loop as deep as the kernel lets it)"
+  else
+    check "a link loop leaves no runaway copy" test ! -e "$R/.claude/skills/alpha/loop/loop"
+  fi
   rm "$R/.agents/skills/alpha/loop"
   bridge "$R" sync > /dev/null
   check "skill copied again once the loop is gone" test -f "$R/.claude/skills/alpha/SKILL.md"
@@ -424,6 +458,48 @@ if command -v cygpath > /dev/null 2>&1; then
   bridge "$R" sync > /dev/null 2>&1
   check "copy with a junction in it replaced" sh -c "grep -q 'With a junction in the copy.' '$R/.claude/skills/alpha/SKILL.md' && test ! -e '$R/.claude/skills/alpha/j'"
   check "what that junction pointed to is untouched" grep -qx keep "$R/precious/keep.txt"
+  junction "$R/.agents/skills/alpha/project" "$R"
+  started=$(date +%s)
+  out=$(bridge "$R" session 2>&1)
+  check "a junction up to the repository does not hang the sync" test $(($(date +%s) - started)) -lt 60
+  check "nor does the bridge copy its own copy" test ! -e "$R/.claude/skills/alpha/project/.claude/skills/alpha/project"
+  if [ "$impl" = ps1 ]; then
+    check "the PowerShell twin keeps the skill's copy, without the bridge's own folder" sh -c 'test -f "$1/SKILL.md" && test ! -e "$1/project/.claude/skills"' x "$R/.claude/skills/alpha"
+    out=$(bridge "$R" session 2>&1)
+    check "nor does every hook copy the skill again" lacks "$out" 'reloadSkills'
+  else
+    # The shell script leaves such a link to cp, and GNU cp may refuse the whole skill.
+    check "the shell script says what cp refused" sh -c 'case $1 in *"Could not copy"* | *"could be copied"*) exit 0 ;; esac; exit 1' x "$out"
+  fi
+  unjunction "$R/.agents/skills/alpha/project"
+  bridge "$R" sync > /dev/null 2>&1
+  check "the skill is copied again once that junction is gone" sh -c 'test -f "$1/SKILL.md" && test ! -e "$1/project"' x "$R/.claude/skills/alpha"
+  mkdir -p "$R/chain-end" "$R/chain-mid"
+  echo a > "$R/chain-end/a.md"
+  echo b > "$R/chain-end/b.md"
+  junction "$R/chain-mid/current" "$R/chain-end"
+  junction "$R/.agents/skills/alpha/chain" "$R/chain-mid/current"
+  bridge "$R" sync > /dev/null 2>&1
+  check "a junction to a junction is followed to its end" test -f "$R/.claude/skills/alpha/chain/b.md"
+  sleep 1
+  rm "$R/chain-end/b.md"
+  bridge "$R" sync > /dev/null 2>&1
+  check "a file deleted at the end of that chain is deleted from the copy" sh -c 'test -f "$1/a.md" && test ! -e "$1/b.md"' x "$R/.claude/skills/alpha/chain"
+  unjunction "$R/.agents/skills/alpha/chain"
+  unjunction "$R/chain-mid/current"
+  mkdir -p "$R/.agents/skills/alpha/attr"
+  echo one > "$R/.agents/skills/alpha/attr/f.md"
+  bridge "$R" sync > /dev/null 2>&1
+  cmd //c attrib +r "$(cygpath -w "$R/.claude/skills/alpha/attr")" > /dev/null
+  sleep 1
+  echo two > "$R/.agents/skills/alpha/attr/f.md"
+  out=$(bridge "$R" session 2>&1)
+  check "a copy with a read-only folder in it replaced" grep -qx two "$R/.claude/skills/alpha/attr/f.md"
+  check "without a complaint" lacks "$out" 'Could not replace'
+  rm -rf "$R/.agents/skills/alpha/attr"
+  bridge "$R" sync > /dev/null 2>&1
+else
+  echo "  skip junction cases (no junctions here)"
 fi
 
 echo "9. stale lock"
@@ -438,6 +514,12 @@ skill "$R" epsilon
 # In a subshell: before a function call, POSIX lets the assignment outlive the call (zsh keeps it).
 (AGENT_SKILLS_BRIDGE=off bridge "$R" sync > /dev/null)
 check "AGENT_SKILLS_BRIDGE=off does nothing" test ! -e "$R/.claude/skills/epsilon"
+(
+  AGENT_SKILLS_BRIDGE=off
+  export AGENT_SKILLS_BRIDGE
+  bridge "$R" guard '{"tool_name":"Edit","tool_input":{"file_path":"'"$(tool_path "$R/.claude/skills/alpha/SKILL.md")"'"}}' > /dev/null 2>&1
+)
+check "nor does the guard refuse then" test $? = 0
 
 echo "11. status and clean"
 st=$(bridge "$R" status 2>&1)
@@ -450,6 +532,13 @@ check "clean deletes copies" test ! -e "$R/.claude/skills/alpha"
 check "clean deletes the records" test ! -e "$S"
 check "clean keeps skills it did not make" test -f "$R/.claude/skills/gamma/SKILL.md"
 check "clean keeps the anchor" test -f "$R/.claude/skills/.gitignore"
+K=$(new_repo lastcopy)
+skill "$K" alpha
+bridge "$K" session > /dev/null
+rm -rf "$K/.agents/skills/alpha"
+bridge "$K" sync > /dev/null
+bridge "$K" clean > /dev/null
+check "clean deletes the records that a sync left when it deleted the last copy" test ! -e "$K/.claude/skills/.agent-skills-bridge"
 
 echo "12. no .agents/skills"
 E=$(new_repo empty)
@@ -591,7 +680,15 @@ if [ "$impl" = sh ]; then
   st=$(cd "$C" && CDPATH=$base/cdtrap sh .claude/hooks/agent-skills-bridge.sh status < /dev/null 2>&1)
   check "status by a relative path ignores CDPATH" sh -c 'case $1 in *cdtrap*) exit 1 ;; *"1 skill(s): alpha"*) exit 0 ;; *) exit 1 ;; esac' x "$st"
   out=$(cd "$base" && printf '' | CDPATH=$base/cdtrap CLAUDE_PROJECT_DIR=crlf "$hook_shell" -c "$(hook_command session)" 2>&1)
-  check "a hook with a relative CLAUDE_PROJECT_DIR ignores CDPATH" sh -c 'case $1 in *cdtrap*) exit 1 ;; "{"*crlf/.agents/skills*) exit 0 ;; *) exit 1 ;; esac' x "$out"
+  # The watch path must be absolute: drawn from where the shell is, not from the relative name.
+  absolute_watch() {
+    case $1 in
+      *cdtrap*) return 1 ;;
+      *'"watchPaths":["/'*crlf/.agents/skills* | *'"watchPaths":["'[A-Za-z]:/*crlf/.agents/skills*) return 0 ;;
+    esac
+    return 1
+  }
+  check "a hook with a relative CLAUDE_PROJECT_DIR ignores CDPATH and watches an absolute path" absolute_watch "$out"
 else
   echo "  skip (PowerShell has no CDPATH)"
 fi
@@ -635,9 +732,20 @@ if [ -n "$F" ]; then
   check "a copy that cannot be deleted is reported" contains "$out" 'Could not delete the old copy .claude/skills/alpha'
   check "and stays the bridge's" grep -qx alpha "$F/.claude/skills/.agent-skills-bridge/manifest"
   let_go
-  out=$(bridge "$F" session 2>&1)
+  bridge "$F" session > /dev/null 2>&1
   check "the next sync deletes it" test ! -e "$F/.claude/skills/alpha"
-  check "without calling it someone else's" lacks "$out" 'was not made by the bridge'
+  # The same once more, but now the skill comes back while its old copy still cannot be deleted: the
+  # leftover is the bridge's own, to replace, and no skill of someone else's.
+  skill "$F" alpha "Third body."
+  bridge "$F" session > /dev/null 2>&1
+  rm -rf "$F/.agents/skills/alpha"
+  hold
+  bridge "$F" session > /dev/null 2>&1
+  skill "$F" alpha "Back again."
+  let_go
+  out=$(bridge "$F" session 2>&1)
+  check "a skill that comes back replaces the copy that could not be deleted" grep -q 'Back again.' "$F/.claude/skills/alpha/SKILL.md"
+  check "without calling that copy someone else's" lacks "$out" 'was not made by the bridge'
 fi
 
 echo "20. files that cannot be copied"
@@ -661,6 +769,8 @@ if [ -n "$X" ]; then
   let_go "$X/.agents/skills/alpha/secret.md"
   check "a skill is copied without the file that cannot be read" sh -c "test -f '$X/.claude/skills/alpha/SKILL.md' && test ! -e '$X/.claude/skills/alpha/secret.md'"
   check "and the gap is reported" contains "$out" 'could be copied'
+  bridge "$X" session > /dev/null 2>&1
+  check "the file arrives once it can be read" test -f "$X/.claude/skills/alpha/secret.md"
   skill "$X" beta
   echo ref > "$X/.agents/skills/beta/ref.md"
   sleep 1
@@ -682,6 +792,8 @@ check "copied under such a path" test -f "$N/.claude/skills/alpha/SKILL.md"
 check "the watch path spells the letter in UTF-8" contains "$out" "caf$e/.agents/skills"
 bridge "$N" guard '{"tool_name":"Edit","tool_input":{"file_path":"'"$(tool_path "$N/.claude/skills/alpha/SKILL.md")"'"}}' > /dev/null 2>&1
 check "edit inside a copy refused under such a path" test $? = 2
+st=$(bridge "$N" status 2>&1)
+check "status spells the letter in UTF-8 through a pipe too" contains "$st" "caf$e"
 
 echo "22. network path"
 U=$(new_repo share)
@@ -700,18 +812,19 @@ else
   echo "  skip (no //localhost/<drive>\$ share here)"
 fi
 
-echo "23. zsh with an alias from .zshenv"
+echo "23. zsh with an alias and an option from .zshenv"
 if [ "$impl" = sh ] && [ "${hook_shell##*/}" = zsh ]; then
   A=$(new_repo zshenv)
   skill "$A" alpha
   mkdir -p "$base/zdot"
-  echo "alias has='echo ALIAS-RAN'" > "$base/zdot/.zshenv"
+  printf '%s\n' "alias has='echo ALIAS-RAN'" 'setopt markdirs' > "$base/zdot/.zshenv"
   out=$( (
     ZDOTDIR=$base/zdot
     export ZDOTDIR
     bridge "$A" session
   ) 2>&1)
   check "the hook still syncs" sh -c 'case $1 in *"parse error"* | *ALIAS-RAN*) exit 1 ;; *reloadSkills*) exit 0 ;; esac; exit 1' x "$out"
+  check "and copies the skill, whatever options .zshenv sets" test -f "$A/.claude/skills/alpha/SKILL.md"
 else
   echo "  skip (the hooks do not run in zsh)"
 fi
@@ -754,6 +867,27 @@ bridge "$M" sync > /dev/null
 st=$(bridge "$M" status 2>&1)
 check "the next sync finishes the work" contains "$st" 'copies are current'
 check "and leaves nothing half-made in the records" test "$(cd "$MS" && echo .[!.]* *)" = '.gitignore manifest stamp'
+
+echo "26. hooks without the script"
+# The hooks can outlive the script: a branch without the kit, or a kit removed by halves. dash and
+# BusyBox ash end with status 2 when "." finds no file, and Claude Code reads 2 as the guard's no.
+Q=$base/noscript
+mkdir -p "$Q/.claude/hooks"
+bridge "$Q" guard '{"tool_name":"Write","tool_input":{"file_path":"'"$(tool_path "$Q/README.md")"'","content":"x"}}' > /dev/null 2>&1
+check "a guard without its script lets the edit pass" test $? = 0
+bridge "$Q" session > /dev/null 2>&1
+check "a session hook without its script does not fail" test $? = 0
+
+echo "27. a skill folder with a name the bridge cannot use"
+B=$(new_repo badname)
+skill "$B" alpha
+skill "$B" "bad name"
+sleep 1 # see 1
+out=$(bridge "$B" session)
+check "the folder is skipped, the other skill copied" sh -c 'test -f "$1/alpha/SKILL.md" && test ! -e "$1/bad name"' x "$B/.claude/skills"
+check "it is reported once" test "$(printf '%s\n' "$out" | awk '{ n += gsub(/Skipped a folder/, "") } END { print n + 0 }')" = 1
+out=$(bridge "$B" sync '{"hook_event_name":"FileChanged","file_path":"x/.agents/skills/alpha/SKILL.md"}')
+check "and not again at every file event" test -z "$out"
 
 echo
 echo "$pass passed, $fail failed"

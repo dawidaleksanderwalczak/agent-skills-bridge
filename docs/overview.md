@@ -125,11 +125,14 @@ itself, so the terminal someone starts it from doesn't matter. Every hook theref
 command that is valid in both shell families:
 
 ```text
-set \' ; ASB_CMD=session . "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.sh" ; exit ; #' ; & "$env:CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.ps1" session ; exit $LASTEXITCODE
+set \' ; test -r "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.sh" || exit 0 ; ASB_CMD=session . "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.sh" ; exit ; #' ; & "$env:CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.ps1" session ; exit $LASTEXITCODE
 ```
 
 - **POSIX shell.** `\'` is a literal quote. The shell sources the script and exits, and the rest is a
   comment. Should the hook shell be zsh, the script puts it into `sh` emulation first.
+- **A hook without its script does nothing.** `test -r ... || exit 0` comes first, because dash and
+  BusyBox `ash` end with status 2 when `.` finds no file, and Claude Code reads status 2 from a
+  `PreToolUse` hook as a refusal.
 - **PowerShell.** `\'...#'` is one quoted argument to `Set-Variable`, so the POSIX half is inert.
   PowerShell runs the `.ps1` file and passes its exit code on.
 - **cmd.exe.** A hook's `shell` setting accepts only `bash` and `powershell`, and
@@ -149,9 +152,10 @@ set \' ; ASB_CMD=session . "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridg
   PowerShell 5.1's `Remove-Item -Recurse` and some Java tools delete *through* junctions.
 - **Copies are read-only and self-healing.** A copy that was edited or deleted is restored at the next
   sync. That includes a copy whose `.gitignore` was deleted.
-- **Links in a skill are followed, loops are not.** A copy holds plain files and folders. A link to
-  nowhere, a link loop or a file that cannot be read is left out and reported, and the rest of the
-  skill is copied.
+- **Links in a skill are followed.** A copy holds plain files and folders. A link to nowhere, a link
+  loop or a file that cannot be read is left out and reported, and the rest of the skill is copied.
+  A file that is there but could not be read keeps the sync unfinished until it can be. For a loop
+  the shell script relies on `cp`: GNU `cp` leaves it out, BusyBox `cp` follows it 40 folders deep.
 - **An unfinished sync never passes for current.** If a copy cannot be replaced or deleted, for
   example because a program holds one of its files open, the bridge says so and the next hook tries
   again. The same holds for a sync that was killed midway.
@@ -164,8 +168,10 @@ set \' ; ASB_CMD=session . "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridg
   Git Bash and network forms.
 - **Concurrent runs are safe.** A lock serialises them. A lock left by a killed run expires after two
   minutes.
-- **It fails open.** A broken bridge never blocks a session or an edit. Problems reach the user as a
-  one-line message.
+- **It fails open.** A broken bridge never blocks a session or an edit, and a hook whose script is
+  missing does nothing. Problems reach the user as a one-line message. One case is out of the
+  bridge's hands: a shell script saved with CRLF makes the shell itself end with status 2, and
+  Claude Code then refuses every Write until the line endings are repaired.
 - **Kill switch.** `AGENT_SKILLS_BRIDGE=off` turns the hooks into no-ops.
 - **Nothing gets committed by accident.**
   - git: each copy and the record folder carry their own `.gitignore`. Git ignores them whatever
@@ -247,7 +253,7 @@ must therefore come from a file (`-F`), or be set in TortoiseSVN's Properties di
 
 | Already there | What to do |
 |---|---|
-| `.claude/settings.json` | Add the bridge's three hook entries next to your own. Claude Code runs all matching hooks. Claude Code itself can do the merge. |
+| `.claude/settings.json` | Add the bridge's four hook entries next to your own: one for `SessionStart`, one for `FileChanged` and two for `PreToolUse`. Claude Code runs all matching hooks. Claude Code itself can do the merge. |
 | Other hooks in `.claude/hooks` | Nothing. The kit's file names start with `agent-skills-bridge`. |
 | Claude-only skills in `.claude/skills` | git: nothing; the copies ignore only themselves. svn: add a new skill folder by name, since `svn:ignore` hides the folder's direct entries. |
 | A `.claude/skills/.gitignore` with your own rules | Keep it. The bridge never edits it and needs no line in it. |
@@ -326,14 +332,17 @@ They cover:
 - the first sync, edits, removals (including a sync that only deletes) and conflicts;
 - a sync with nothing to do, which must start no program;
 - read-only copies, and repair after tampering or deletion;
-- the guard, for Edit, Write, NotebookEdit and MultiEdit: relative paths, `.` and `..`, other letter
-  cases, the Git Bash and network spellings, and events with blanks in their JSON;
-- symlinks, junctions and link loops in a skill, links to nowhere, and a junction inside a copy;
-- a copy that cannot be replaced or deleted, and files that cannot be copied;
+- the guard, for Edit, Write, NotebookEdit and MultiEdit: one copy and two, relative paths, `.` and
+  `..`, other letter cases, the Git Bash and network spellings, and events with blanks in their JSON;
+- symlinks, junctions and link loops in a skill, links to nowhere, a junction up to the repository, a
+  junction to a junction, and a junction or a read-only folder inside a copy;
+- a copy that cannot be replaced or deleted, and a file that cannot be copied at first and can later;
+- hooks whose script is missing, and a skill folder with a name the bridge cannot use;
 - an edit that lands while a sync is running, and a sync that is killed midway;
 - a stale lock, the kill switch, and paths with spaces, with a letter outside ASCII, and on a network
   share;
-- files saved with CRLF, read-only folders, `CDPATH`, and zsh with an alias from `.zshenv`;
+- files saved with CRLF, read-only folders, `CDPATH`, and zsh with an alias and an option from
+  `.zshenv`;
 - `status` and `clean`;
 - git: an existing `.claude/skills` with its own skill and `.gitignore`. Git sees the native skill's
   files but no copy and no record. `status` spots a copy that lost its `.gitignore`, and `sync`
@@ -345,13 +354,13 @@ They cover:
 
 | Platform | Result |
 |---|---|
-| Windows 11, Git Bash | 156 / 156 passed (Windows has no symlinks for the link cases) |
-| Windows 11, Windows PowerShell 5.1 | 150 / 150 passed |
-| Ubuntu 24.04 (WSL2), dash | 145 / 145 passed |
-| Ubuntu 24.04 (WSL2), bash 5.2 as `sh` | 145 / 145 passed |
-| Ubuntu 24.04 (WSL2), zsh 5.9 as `sh` | 145 / 145 passed |
-| Ubuntu 24.04 (WSL2), zsh 5.9 as the hook shell | 146 / 146 passed |
-| Alpine 3.24 container, BusyBox 1.37 | 126 / 126 passed (no git, svn or node in the image) |
+| Windows 11, Git Bash | 174 / 174 passed (Windows has no symlinks for the link cases) |
+| Windows 11, Windows PowerShell 5.1 | 169 / 169 passed |
+| Ubuntu 24.04 (WSL2), dash | 157 / 157 passed |
+| Ubuntu 24.04 (WSL2), bash 5.2 as `sh` | 157 / 157 passed |
+| Ubuntu 24.04 (WSL2), zsh 5.9 as `sh` | 157 / 157 passed |
+| Ubuntu 24.04 (WSL2), zsh 5.9 as the hook shell | 159 / 159 passed |
+| Alpine 3.24 container, BusyBox 1.37 | 137 / 137 passed (no git, svn or node in the image) |
 
 A case that needs something the system lacks is skipped: symlinks and file modes on Windows, junctions
 and network paths elsewhere.
@@ -359,9 +368,10 @@ and network paths elsewhere.
 ### Code review (25 November 2026)
 
 A reviewer went through the kit platform by platform. A second, adversarial review of the fixes
-followed, with every finding reproduced before it was accepted. All of the findings below are fixed,
-and each has a test that failed on the earlier scripts: 39 checks failed there in dash, 66 with zsh
-as the hook shell and 27 in Windows PowerShell.
+followed, with every finding reproduced before it was accepted. All of the findings below are fixed.
+Each but the OneDrive one has a test that failed on the kit as it was: 39 checks failed there in
+dash, 66 with zsh as the hook shell and 27 in Windows PowerShell. For OneDrive, the link test was
+checked against the entries of a OneDrive folder, but no sync has run inside one.
 
 | Finding | Fix |
 |---|---|
@@ -431,6 +441,55 @@ changes how a sync writes its records.
   of date in three rounds. With the scripts as they are now, none did.
 - **Old records.** Both scripts read the records that the earlier scripts wrote, and the earlier
   scripts read the new ones (checked by hand on Windows, in both directions).
+
+### Second review (26 November 2026)
+
+An independent review of the code review's commit followed, from four angles: the shell script's
+sync, both guards, the PowerShell twin's sync, and the tests and documents. The findings below are
+fixed, and each has a test. Of the new checks, 8 fail on the kit as it was before this review in
+dash, 10 with zsh as the hook shell and 17 in Windows PowerShell.
+
+| Finding | Fix |
+|---|---|
+| PowerShell: with two or more copies, the guard's refusal named all of them at once (`.agents/skills/alpha beta/SKILL.md`). | The list of copies is read name by name. |
+| PowerShell: a junction in a skill that leads up to the repository took the bridge into its own `.claude/skills`. It copied its copy until the depth limit, and the skill lost its copy. | The bridge's own folder is no part of a skill: it is left out of the copy and of the search for changes. |
+| PowerShell: a junction to a junction was followed one step only, so a file deleted at the end of the chain stayed in the copy. | Links are followed to their end. |
+| PowerShell: a folder with the read-only attribute inside a copy could not be replaced. | The attribute is lifted from folders too. |
+| PowerShell: `status` and `clean` went through a pipe in the console code page. | They write UTF-8, like the hook answers. |
+| The hook command: where `sh` is dash or BusyBox `ash`, a missing script ended the shell with status 2, and Claude Code refused every Write. | The command tests for the script first and does nothing without it. |
+| A file that could not be read was left out of a copy for good, also once it could be read. | Such a sync counts as unfinished, and the next hook tries again. |
+| zsh as the hook shell kept the options set in `~/.zshenv`; `markdirs` stopped every copy. | Every option goes back to its `sh` default. |
+| The note about a skill folder with an unusable name came with every file event, and twice in a hook that copied. | It comes once per session. |
+| `clean` left the record folder behind when the last sync had deleted the last copy. | It deletes that folder too. |
+| The shell guard named the source file in lower case when the event and the repository differed in letter case. | The message keeps the event's spelling. |
+| Tests and documents: some checks could not fail, the suite left files behind when it was interrupted, and the documents said that a link loop is always left out. | `settings.json` is read entry by entry, a link loop must leave no runaway copy where `cp` sees it, and the file holder ends by itself. The documents now say what BusyBox `cp` does. |
+
+These findings are open. They are older than both reviews, and each needs a decision before a fix:
+
+- **Who owns a copy.** The manifest alone says which folders in `.claude/skills` are the bridge's.
+  If a skill of your own takes a copy's place, the bridge deletes or overwrites it. That happens
+  when a branch that tracks `.claude/skills/foo` is checked out after a sync on a branch that has
+  moved the skill to `.agents/skills/foo`.
+- **A sync killed during its first copy.** The names of new copies reach the manifest only when the
+  sync ends. After a kill they count as someone else's and are never updated. A second session
+  that starts while the first sync still copies reports the same false conflicts.
+- **A file replaced by an older one.** The bridge compares file times with its stamp, not with the
+  copy. A file put in place with an older time (`cp -p`, a Windows copy, `tar`, `rsync -a`) is not
+  copied until something else in the skill changes.
+- **A skill renamed in letter case only**, where the file system ignores case: the shell script
+  reports a conflict and deletes the copy first; the PowerShell twin keeps the old name.
+- **Waiting for a lock.** Each try starts three programs. On a slow Windows machine the wait takes
+  about 115 s, close to the hook's timeout of 120 s.
+- **The Edit filter on Windows.** Read from the Claude Code 2.1.330 program, not confirmed in a live
+  session: after a `cd` in the session, the rule `Edit(**/.claude/skills/**)` no longer matches a
+  Windows path, so the guard does not start for Edit. The copies stay read-only, and the next sync
+  repairs an edited one.
+- **A link from a skill up to the repository, in the shell script.** The PowerShell twin copies the
+  repository once, without its own folder. The shell script leaves the link to `cp`, and GNU `cp`
+  may refuse the whole skill, which then has no copy until the link is gone.
+- **Smaller ones.** A repository path with a control character or, outside Windows, a backslash
+  breaks the watch path. A deleted target of a junction leaves its files in the copy until the
+  skill changes. In Git Bash the guard needs about four seconds to read an event of 1 MB.
 
 ### Adoption flows
 
