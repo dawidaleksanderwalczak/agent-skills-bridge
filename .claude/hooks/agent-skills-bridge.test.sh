@@ -1079,6 +1079,51 @@ check "it is reported once" test "$(printf '%s\n' "$out" | awk '{ n += gsub(/Ski
 out=$(bridge "$B" sync '{"hook_event_name":"FileChanged","file_path":"x/.agents/skills/alpha/SKILL.md"}')
 check "and not again at every file event" test -z "$out"
 
+echo "34. clean after a first sync that left no manifest"
+# unlisted <name>: a repository with two skills and no sync yet. A third skill has the name of a
+# skill of someone's own in .claude/skills, as in 26: clean must keep that one. Sets Z and ZS.
+unlisted() {
+  Z=$(new_repo "$1")
+  ZS=$Z/.claude/skills/.agent-skills-bridge
+  skill "$Z" alpha
+  skill "$Z" beta
+  mkdir -p "$Z/.claude/skills/own"
+  echo 'mine' > "$Z/.claude/skills/own/SKILL.md"
+  skill "$Z" own
+}
+# As in 26, the kill comes when every copy is made and the manifest is not yet written. This time
+# the sync is the first one. There is no manifest at all, and only the stamp says that the copies
+# are the bridge's. Records without a manifest can also be a leftover, see 11. If clean took these
+# for one, it would delete the records and leave the copies, and no sync would touch those again.
+unlisted unlisted
+# shellcheck disable=SC2016 # the bridge expands these, not the test
+meanwhile "$Z" 'Copies made by' 'kill -9 $$' 'Stop-Process -Id $PID -Force'
+(bridge "$Z" session) > /dev/null 2>&1
+pristine "$Z"
+check "a first sync that was killed made its copies" sh -c 'test -f "$1/alpha/SKILL.md" && test -f "$1/beta/SKILL.md"' x "$Z/.claude/skills"
+check "and left no manifest" test ! -e "$ZS/manifest"
+touch -t 202001010000 "$ZS/lock" # see 9
+out=$(bridge "$Z" clean 2>&1)
+check "clean deletes the copies that only the stamp names" sh -c 'test ! -e "$1/alpha" && test ! -e "$1/beta"' x "$Z/.claude/skills"
+check "and says which" contains "$out" 'deleted the copies: alpha beta.'
+check "and deletes the records" test ! -e "$ZS"
+check "and keeps the skill of someone's own" grep -qx mine "$Z/.claude/skills/own/SKILL.md"
+# The same without a kill, as in 28: a first sync ends by itself, and its manifest does not arrive.
+# That sync takes its lock with it, so nothing but the names in the stamp keeps clean from deleting
+# the records alone. In a repository of its own, so that it does not rest on what the kill left.
+unlisted unlisted-too
+# shellcheck disable=SC2016
+meanwhile "$Z" 'Copies made by' 'rm -f "$lock/manifest" "$lock/stamp"' '$manifest = Join-Path $manifest nowhere'
+bridge "$Z" sync > /dev/null 2>&1
+pristine "$Z"
+check "a first sync whose manifest does not arrive made its copies" sh -c 'test -f "$1/alpha/SKILL.md" && test -f "$1/beta/SKILL.md"' x "$Z/.claude/skills"
+check "and left neither a manifest nor a lock" sh -c 'test ! -e "$1/manifest" && test ! -e "$1/lock"' x "$ZS"
+out=$(bridge "$Z" clean 2>&1)
+check "clean deletes these copies too" sh -c 'test ! -e "$1/alpha" && test ! -e "$1/beta"' x "$Z/.claude/skills"
+check "and says which" contains "$out" 'deleted the copies: alpha beta.'
+check "and deletes the records" test ! -e "$ZS"
+check "and keeps the skill of someone's own" grep -qx mine "$Z/.claude/skills/own/SKILL.md"
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]

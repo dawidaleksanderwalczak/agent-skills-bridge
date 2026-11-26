@@ -634,6 +634,8 @@ cover:
 - a sync that cannot write its stamp, and one whose manifest does not arrive;
 - a session that starts while another sync makes a new copy;
 - what a killed sync of the PowerShell twin leaves in the records;
+- `clean` after a first sync that left no manifest, because it was killed or because its manifest
+  did not arrive;
 - a stale lock and the off switch;
 - `status` and `clean`;
 - paths with spaces, with a letter outside ASCII, and network paths;
@@ -650,13 +652,13 @@ Results on 26 November 2026:
 
 | System | Shell | Result |
 |---|---|---|
-| Windows 11 | Git Bash (bash 5.3 as `sh`) | 218/218; Windows has no symlinks for the link cases |
-| Windows 11 | Windows PowerShell 5.1 | 213/213 |
-| Ubuntu 24.04 (WSL) | dash 0.5.12 | 201/201 |
-| Ubuntu 24.04 (WSL) | bash 5.2 as `sh` | 201/201 |
-| Ubuntu 24.04 (WSL) | zsh 5.9 as `sh` | 201/201 |
-| Ubuntu 24.04 (WSL) | zsh 5.9 as the hook shell | 203/203 |
-| Alpine 3.24 (container) | BusyBox 1.37 `ash` and tools | 181/181; no git, svn or node there |
+| Windows 11 | Git Bash (bash 5.3 as `sh`) | 230/230; Windows has no symlinks for the link cases |
+| Windows 11 | Windows PowerShell 5.1 | 225/225 |
+| Ubuntu 24.04 (WSL) | dash 0.5.12 | 213/213 |
+| Ubuntu 24.04 (WSL) | bash 5.2 as `sh` | 213/213 |
+| Ubuntu 24.04 (WSL) | zsh 5.9 as `sh` | 213/213 |
+| Ubuntu 24.04 (WSL) | zsh 5.9 as the hook shell | 215/215 |
+| Alpine 3.24 (container) | BusyBox 1.37 `ash` and tools | 193/193; no git, svn or node there |
 
 Run against the scripts as they were before the review of 25 November 2026, the tests of that review
 failed in 39 places in dash, 66 with zsh as the hook shell and 27 in Windows PowerShell. The test
@@ -682,6 +684,11 @@ the records that the scripts of before wrote, and those scripts read the new rec
 A second review on 26 November 2026 added more checks. Run against the kit as it was before that
 review, 8 of them fail in dash, 10 with zsh as the hook shell and 17 in Windows PowerShell.
 `docs/overview.md` lists what that review found, and what it left open.
+
+That review and the work on the records were done side by side, and both changed how `clean`
+begins. When the two were brought together, one more test came: `clean` after a first sync that
+left no manifest. Against the scripts of the second review alone, 5 of its 12 checks fail, and 6
+against the scripts from before both. The numbers are the same in all seven environments above.
 
 A manual check from cmd.exe on Windows 11 also passed, in a repository whose path has a space:
 

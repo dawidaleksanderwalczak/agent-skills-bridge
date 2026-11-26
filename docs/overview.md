@@ -348,6 +348,8 @@ They cover:
 - a sync that cannot write its stamp, and one whose manifest does not arrive;
 - a session that starts while another sync makes a new copy;
 - what a killed sync of the PowerShell twin leaves in the records;
+- `clean` after a first sync that left no manifest, because it was killed or because its manifest
+  did not arrive;
 - a stale lock, the kill switch, and paths with spaces, with a letter outside ASCII, and on a network
   share;
 - files saved with CRLF, read-only folders, `CDPATH`, and zsh with an alias and an option from
@@ -363,13 +365,13 @@ They cover:
 
 | Platform | Result |
 |---|---|
-| Windows 11, Git Bash | 218 / 218 passed (Windows has no symlinks for the link cases) |
-| Windows 11, Windows PowerShell 5.1 | 213 / 213 passed |
-| Ubuntu 24.04 (WSL2), dash | 201 / 201 passed |
-| Ubuntu 24.04 (WSL2), bash 5.2 as `sh` | 201 / 201 passed |
-| Ubuntu 24.04 (WSL2), zsh 5.9 as `sh` | 201 / 201 passed |
-| Ubuntu 24.04 (WSL2), zsh 5.9 as the hook shell | 203 / 203 passed |
-| Alpine 3.24 container, BusyBox 1.37 | 181 / 181 passed (no git, svn or node in the image) |
+| Windows 11, Git Bash | 230 / 230 passed (Windows has no symlinks for the link cases) |
+| Windows 11, Windows PowerShell 5.1 | 225 / 225 passed |
+| Ubuntu 24.04 (WSL2), dash | 213 / 213 passed |
+| Ubuntu 24.04 (WSL2), bash 5.2 as `sh` | 213 / 213 passed |
+| Ubuntu 24.04 (WSL2), zsh 5.9 as `sh` | 213 / 213 passed |
+| Ubuntu 24.04 (WSL2), zsh 5.9 as the hook shell | 215 / 215 passed |
+| Alpine 3.24 container, BusyBox 1.37 | 193 / 193 passed (no git, svn or node in the image) |
 
 A case that needs something the system lacks is skipped: symlinks and file modes on Windows, junctions
 and network paths elsewhere.
@@ -592,6 +594,32 @@ The work on the records left two smaller gaps. Both are closed, each with a test
   checks with real processes, and the two scripts taking over from each other. After a killed sync
   of the twin, the shell script now leaves nothing but the manifest and the stamp in the records.
 
+### `clean` without a manifest (26 November 2026)
+
+The second review and the work on the records were done side by side, from the same state of the
+kit, and both changed how `clean` begins. Each added a case in which there is no manifest:
+
+| Case | What `clean` does |
+|---|---|
+| The last sync deleted the last copy. It deleted its manifest too and left the record folder behind. | It deletes the record folder (second review). |
+| The first sync never wrote a manifest: it was killed, or the manifest could not be put in place. Its stamp names the copies. | It deletes those copies, and then the records (the work on the records). |
+
+- **Why the order matters.** The two cases look alike. If `clean` took the second for the first, it
+  would delete the records and leave the copies. No sync would touch those again: every later plan
+  would take them for someone's own skills. So `clean` reads the names in the records first. It
+  deletes a record folder by itself only when no record names a copy and no lock says that a sync is
+  at work.
+- **The test** runs `clean` after a first sync that was killed after its last copy, and after one
+  whose manifest did not arrive and that left no lock. In both, a skill of someone's own that has
+  the name of a skill in `.agents/skills` must stay. Against the scripts of the second review alone,
+  5 of the 12 checks fail: after the kill nothing is deleted, and without the lock the records go
+  and the copies stay. Against the scripts from before both, 6 fail. The numbers are the same in
+  all seven environments. With the work on the records alone all 12 pass, because the second case
+  came with it.
+- **Checked by hand** in dash, Git Bash and Windows PowerShell 5.1, in four states of the records
+  without a manifest: the two above, a stamp that was cut short and names no copy, and the same with
+  a lock.
+
 ### Adoption flows
 
 | Flow | Result |
@@ -626,7 +654,7 @@ installed.
 
 These ran before the reviews, with the earlier layout, which kept the ignore rule in
 `.claude/skills/.gitignore`. The hook commands are the same today; the scripts behind them have
-changed as the two review sections and the four sections after them describe, from "An edit during
+changed as the two review sections and the five sections after them describe, from "An edit during
 a sync" on. Claude Code's skill loader skips a folder without `SKILL.md` silently, so the new record
 folder is never taken for a skill.
 
