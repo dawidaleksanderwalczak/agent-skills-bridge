@@ -390,9 +390,19 @@ function Invoke-Sync {
     try { [IO.File]::WriteAllText($stateIgnore, "# Records of .claude/hooks/agent-skills-bridge.sh. Git ignores this folder.`n*`n", $utf8) } catch { }
   }
   if (-not (Enter-Lock)) { Add-Note 'Another sync was still running, so this one was skipped.'; return }
+  $newStamp = "$stamp.tmp"
   try {
+    # The stamp of this sync is written now, before the plan looks at the skills: a file that
+    # changes while the plan runs is then no older than the stamp, and the next sync copies it. The
+    # stamp waits under another name, because the plan still compares with the stamp of the last
+    # sync. It is a file, as in the shell script, so its time comes from the clock that also stamps
+    # the skills' files. [DateTime]::UtcNow is another clock: in PowerShell 7 it runs up to a clock
+    # tick ahead of the file times, and on a network share the server stamps the files.
+    [IO.File]::WriteAllText($newStamp, '', $utf8)
     $plan = Get-Plan # again: a sync that held the lock may have done the work
     if (($plan.Stale.Count + $plan.Gone.Count) -eq 0) { return }
+    # Until this sync ends, the stamp in the records is newer than the manifest: a sync that is
+    # killed midway counts as unfinished, and the next one makes every copy again.
     [IO.File]::WriteAllText($stamp, '', $utf8)
     $script:changed = $true
     $broken = $false
@@ -416,12 +426,19 @@ function Invoke-Sync {
     $text = "# Copies made by .claude/hooks/agent-skills-bridge.sh from .agents/skills. Do not edit.`n" + (($kept | ForEach-Object { "$_`n" }) -join '')
     $tmp = "$manifest.tmp"
     [IO.File]::WriteAllText($tmp, $text, $utf8)
+    # The stamp from before the plan and the manifest go into the records, the stamp first: should
+    # the sync stop between the two, it still counts as unfinished.
+    Move-Item -LiteralPath $newStamp -Destination $stamp -Force
     Move-Item -LiteralPath $tmp -Destination $manifest -Force
     # What could not be deleted or made whole must not pass for current. Without the stamp this sync
     # counts as unfinished, and the next one makes every copy again.
     if ($broken) { Remove-Item -LiteralPath $stamp -Force -ErrorAction SilentlyContinue }
   }
-  finally { Exit-Lock }
+  finally {
+    # The waiting stamp, where the sync did not use it.
+    Remove-Item -LiteralPath $newStamp -Force -ErrorAction SilentlyContinue
+    Exit-Lock
+  }
 }
 
 # The repository path the way Claude Code spells it, with forward slashes.

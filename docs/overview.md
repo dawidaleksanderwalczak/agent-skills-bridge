@@ -154,7 +154,11 @@ set \' ; ASB_CMD=session . "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridg
   skill is copied.
 - **An unfinished sync never passes for current.** If a copy cannot be replaced or deleted, for
   example because a program holds one of its files open, the bridge says so and the next hook tries
-  again.
+  again. The same holds for a sync that was killed midway.
+- **An edit during a sync is not lost.** Each sync writes its time stamp before it looks at the
+  skills, and the next sync copies every skill that holds a file changed at or after that stamp. A
+  file that changes while a sync is running, for example during a `git pull`, is copied by the next
+  hook.
 - **Edits are redirected.** The guard refuses Claude's edits to a copy and names the source file. It
   knows the usual spellings of a path: relative, with `.` and `..`, in another letter case, and the
   Git Bash and network forms.
@@ -326,6 +330,7 @@ They cover:
   cases, the Git Bash and network spellings, and events with blanks in their JSON;
 - symlinks, junctions and link loops in a skill, links to nowhere, and a junction inside a copy;
 - a copy that cannot be replaced or deleted, and files that cannot be copied;
+- an edit that lands while a sync is running, and a sync that is killed midway;
 - a stale lock, the kill switch, and paths with spaces, with a letter outside ASCII, and on a network
   share;
 - files saved with CRLF, read-only folders, `CDPATH`, and zsh with an alias from `.zshenv`;
@@ -340,13 +345,13 @@ They cover:
 
 | Platform | Result |
 |---|---|
-| Windows 11, Git Bash | 149 / 149 passed (Windows has no symlinks for the link cases) |
-| Windows 11, Windows PowerShell 5.1 | 143 / 143 passed |
-| Ubuntu 24.04 (WSL2), dash | 138 / 138 passed |
-| Ubuntu 24.04 (WSL2), bash 5.2 as `sh` | 138 / 138 passed |
-| Ubuntu 24.04 (WSL2), zsh 5.9 as `sh` | 138 / 138 passed |
-| Ubuntu 24.04 (WSL2), zsh 5.9 as the hook shell | 139 / 139 passed |
-| Alpine 3.24 container, BusyBox 1.37 | 119 / 119 passed (no git, svn or node in the image) |
+| Windows 11, Git Bash | 156 / 156 passed (Windows has no symlinks for the link cases) |
+| Windows 11, Windows PowerShell 5.1 | 150 / 150 passed |
+| Ubuntu 24.04 (WSL2), dash | 145 / 145 passed |
+| Ubuntu 24.04 (WSL2), bash 5.2 as `sh` | 145 / 145 passed |
+| Ubuntu 24.04 (WSL2), zsh 5.9 as `sh` | 145 / 145 passed |
+| Ubuntu 24.04 (WSL2), zsh 5.9 as the hook shell | 146 / 146 passed |
+| Alpine 3.24 container, BusyBox 1.37 | 126 / 126 passed (no git, svn or node in the image) |
 
 A case that needs something the system lacks is skipped: symlinks and file modes on Windows, junctions
 and network paths elsewhere.
@@ -355,8 +360,8 @@ and network paths elsewhere.
 
 A reviewer went through the kit platform by platform. A second, adversarial review of the fixes
 followed, with every finding reproduced before it was accepted. All of the findings below are fixed,
-and each has a test that fails on the earlier scripts: 39 checks fail there in dash, 66 with zsh as
-the hook shell and 27 in Windows PowerShell.
+and each has a test that failed on the earlier scripts: 39 checks failed there in dash, 66 with zsh
+as the hook shell and 27 in Windows PowerShell.
 
 | Finding | Fix |
 |---|---|
@@ -393,6 +398,40 @@ folders" found these problems. All of them are fixed and covered by the tests ab
 | The PowerShell `status` crashed in a non-svn repository on machines with svn installed: Windows PowerShell 5.1 turns redirected stderr into a fatal error under `Stop` (checked). | A helper runs git and svn without that effect. A test now checks that `status` runs to the end. |
 | Test harness: BusyBox compares file times in whole seconds, and zsh keeps an assignment made in front of a function call. | The tests now allow for both. The bridge itself was unaffected. |
 
+### An edit during a sync (26 November 2026)
+
+The code review had noticed one more problem and left it for a change of its own, because the fix
+changes how a sync writes its records.
+
+| Finding | Fix |
+|---|---|
+| Both: a sync wrote its time stamp after it had looked at every skill. A file that was edited in between, for example by a `git pull` that was still running, was older than the stamp. No later sync copied it, and the copy stayed out of date until the skill changed again. | The stamp is written before the look, under another name, so that the look still compares with the stamp of the sync before. It goes into the records together with the manifest when the sync ends. |
+
+- **No extra process.** A shell cannot set a file's time without starting a program. So the shell
+  script writes the new stamp into its lock folder and moves it with the `mv` that already moved the
+  manifest. A sync with work to do starts as many programs as before, and one with nothing to do
+  still starts none.
+- **The file system's clock.** PowerShell could set the stamp's time from its own clock, but the
+  twin writes a file too. On the test machine, in 2,016 of 3,000 writes the file's time was behind
+  the precise system clock, by up to 14 ms. That is the clock PowerShell 7 reads for
+  `[DateTime]::UtcNow`, so a stamp set from it could be later than an edit that came after it. On a
+  network share, the server stamps the files.
+- **An unfinished sync.** While a sync works, the stamp in the records is still newer than the
+  manifest, as before, so a sync that is killed counts as unfinished. So does a sync whose stamp or
+  manifest does not arrive at the end: the shell script then deletes the stamp, and the PowerShell
+  twin stops before the manifest is in place. The next sync makes every copy again.
+- **The test** runs a sync whose script carries one more line: after the look at the skills, it
+  edits a skill that the look found unchanged. No file time set by hand can stand in for that,
+  because the moment lies inside one run. The test fails on the scripts of the code review, in dash,
+  BusyBox and Windows PowerShell 5.1, and passes now. A second test kills a sync between its last
+  copy and its manifest and checks that the next plan calls every copy out of date.
+- **With real processes.** In dash on Ubuntu, one process edited 600 skills, about one edit a
+  millisecond, while two others ran sync after sync. When the edits stopped, one more sync had to
+  bring every copy up to date. With the scripts of the code review, 36, 78 and 30 copies stayed out
+  of date in three rounds. With the scripts as they are now, none did.
+- **Old records.** Both scripts read the records that the earlier scripts wrote, and the earlier
+  scripts read the new ones (checked by hand on Windows, in both directions).
+
 ### Adoption flows
 
 | Flow | Result |
@@ -427,9 +466,9 @@ installed.
 
 These ran before the reviews, with the earlier layout, which kept the ignore rule in
 `.claude/skills/.gitignore`. The hook commands are the same today; the scripts behind them have
-changed as the two review sections above describe. Claude Code's skill loader
-skips a folder without `SKILL.md` silently, so the new record folder is never taken for a skill
-(read in the 2.1.330 program).
+changed as the two review sections and "An edit during a sync" above describe. Claude Code's skill
+loader skips a folder without `SKILL.md` silently, so the new record folder is never taken for a
+skill (read in the 2.1.330 program).
 
 | Check | Result |
 |---|---|

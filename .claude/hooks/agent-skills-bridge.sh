@@ -393,8 +393,15 @@ do_sync() {
     note "Another sync was still running, so this one was skipped."
     return 0
   }
+  # The stamp of this sync is written now, before the plan looks at the skills: a file that changes
+  # while the plan runs is then no older than the stamp, and the next sync copies it. The stamp
+  # waits in the lock folder, because the plan still compares with the stamp of the last sync, and
+  # a shell cannot set a file's time later without starting a program.
+  : > "$lock/stamp"
   plan # again: a sync that held the lock may have done the work
   [ -n "$stale$gone" ] || return 0
+  # Until this sync ends, the stamp in the records is newer than the manifest: a sync that is killed
+  # midway counts as unfinished, and the next one makes every copy again.
   : > "$stamp"
   changed=1
   broken=0
@@ -415,12 +422,15 @@ do_sync() {
     rm -f "$manifest" "$stamp"
     return 0
   fi
+  # The stamp from before the plan and the manifest go into the records with one mv, the stamp
+  # first: should mv stop between the two, the sync still counts as unfinished.
   {
     echo '# Copies made by .claude/hooks/agent-skills-bridge.sh from .agents/skills. Do not edit.'
     for n in $kept; do echo "$n"; done
-  } > "$lock/manifest" && mv -f "$lock/manifest" "$manifest"
-  # What could not be deleted or made whole must not pass for current. Without the stamp this sync
-  # counts as unfinished, and the next one makes every copy again.
+  } > "$lock/manifest" && mv -f "$lock/stamp" "$lock/manifest" "$state/" || broken=1
+  # What could not be deleted or made whole must not pass for current, and nor may a sync whose
+  # records did not arrive. Without the stamp this sync counts as unfinished, and the next one makes
+  # every copy again.
   [ "$broken" = 0 ] || rm -f "$stamp"
 }
 

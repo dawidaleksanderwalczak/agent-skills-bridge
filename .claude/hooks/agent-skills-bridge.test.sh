@@ -117,6 +117,19 @@ unblock() {
   rm -f "$base/blocked"
 }
 
+# meanwhile <repo> <text> <sh code> <ps1 code>: makes the bridge in <repo> run the code right after
+# its line that holds <text>. That stands for what another program does at that moment of a sync:
+# an edit, or a kill. No file time set by hand can stand for it, because the moment lies inside one
+# run. It changes the repository's own copy of the script; pristine <repo> puts the kit's scripts
+# back. The code must hold no backslash: awk would read it as an escape.
+meanwhile() {
+  f=$1/.claude/hooks/agent-skills-bridge.$impl
+  if [ "$impl" = ps1 ]; then code=$4; else code=$3; fi
+  awk -v text="$2" -v code="$code" '{ print } index($0, text) { print code }' "$f" > "$f.new" &&
+    mv -f "$f.new" "$f"
+}
+pristine() { cp "$here/agent-skills-bridge.sh" "$here/agent-skills-bridge.ps1" "$1/.claude/hooks/"; }
+
 if [ "$impl" = ps1 ]; then echo "agent-skills bridge tests (ps1 in $powershell)"; else echo "agent-skills bridge tests (sh, hooks in $hook_shell)"; fi
 
 settings=$here/../settings.json
@@ -702,6 +715,45 @@ if [ "$impl" = sh ] && [ "${hook_shell##*/}" = zsh ]; then
 else
   echo "  skip (the hooks do not run in zsh)"
 fi
+
+echo "24. an edit that lands while a sync runs"
+M=$(new_repo meanwhile)
+MS=$M/.claude/skills/.agent-skills-bridge
+skill "$M" alpha
+skill "$M" beta
+sleep 1 # see 1
+bridge "$M" session > /dev/null
+skill "$M" beta "Second body."
+# The sync finds beta changed and alpha unchanged. Right after it has looked, alpha changes too. The
+# sync goes on a second later, so the edit is older than everything the sync writes from then on.
+meanwhile "$M" 'again: a sync that held the lock' \
+  "echo 'Landed while a sync ran.' >> .agents/skills/alpha/SKILL.md; sleep 1" \
+  "[IO.File]::AppendAllText((Join-Path \$src 'alpha/SKILL.md'), 'Landed while a sync ran.'); Start-Sleep -Seconds 1"
+bridge "$M" sync > /dev/null
+pristine "$M"
+check "an edit landed after the sync had looked at the skill" grep -q 'Landed while a sync ran.' "$M/.agents/skills/alpha/SKILL.md"
+check "that sync copied what it had found changed" grep -q 'Second body.' "$M/.claude/skills/beta/SKILL.md"
+bridge "$M" sync > /dev/null
+check "the next sync copies the skill that changed meanwhile" grep -q 'Landed while a sync ran.' "$M/.claude/skills/alpha/SKILL.md"
+
+echo "25. a sync that is killed midway"
+sleep 1 # whole-second clocks: the killed sync's stamp must be newer than the last manifest
+skill "$M" beta "Third body."
+# The kill comes when every copy is made and the manifest is not yet written. In a subshell: the
+# shell reports a killed command, and that report belongs nowhere.
+# shellcheck disable=SC2016 # the bridge expands these, not the test
+meanwhile "$M" 'Copies made by' 'kill -9 $$' 'Stop-Process -Id $PID -Force'
+(bridge "$M" sync) > /dev/null 2>&1
+pristine "$M"
+check "the killed sync leaves its lock behind" test -e "$MS/lock"
+st=$(bridge "$M" status 2>&1)
+check "a sync that was killed does not pass for finished" contains "$st" 'out of date: alpha beta'
+sleep 1 # see 1: or the edit of beta counts as new once more, where clocks tick in whole seconds
+touch -t 202001010000 "$MS/lock" # see 9
+bridge "$M" sync > /dev/null
+st=$(bridge "$M" status 2>&1)
+check "the next sync finishes the work" contains "$st" 'copies are current'
+check "and leaves nothing half-made in the records" test "$(cd "$MS" && echo .[!.]* *)" = '.gitignore manifest stamp'
 
 echo
 echo "$pass passed, $fail failed"

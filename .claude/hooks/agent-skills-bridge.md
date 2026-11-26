@@ -50,6 +50,12 @@ and folders. What cannot be copied is left out and reported: a link to nowhere, 
 that cannot be read. A sync that cannot finish, for example because a program holds a file of a copy
 open, is reported too, and the next hook tries again. Such a copy never passes for current.
 
+The bridge decides by file times what to copy. Each sync writes a time stamp before it looks at the
+skills, and the next sync copies every skill that holds a file changed at or after that stamp. So a
+change that arrives while a sync is running, for example while `git pull` is still writing files, is
+not lost: the next hook copies it. A sync that was killed midway counts as unfinished, and the next
+one makes every copy again.
+
 ## Files
 
 | Path | In version control | What it is |
@@ -595,6 +601,7 @@ cover:
 - links, junctions and link loops in a skill, links to nowhere, and a junction that someone put into
   a copy;
 - a copy that cannot be replaced or deleted, and files that cannot be copied;
+- an edit that lands while a sync is running, and a sync that is killed midway;
 - a stale lock and the off switch;
 - `status` and `clean`;
 - paths with spaces, with a letter outside ASCII, and network paths;
@@ -606,20 +613,27 @@ cover:
 A case that needs something the system lacks is skipped, and the test says so: symlinks and file
 modes on Windows, junctions and network paths elsewhere, git, svn or node where they are missing.
 
-Results on 25 and 26 November 2026:
+Results on 26 November 2026:
 
 | System | Shell | Result |
 |---|---|---|
-| Windows 11 | Git Bash (bash 5.3 as `sh`) | 149/149; Windows has no symlinks for the link cases |
-| Windows 11 | Windows PowerShell 5.1 | 143/143 |
-| Ubuntu 24.04 (WSL) | dash 0.5.12 | 138/138 |
-| Ubuntu 24.04 (WSL) | bash 5.2 as `sh` | 138/138 |
-| Ubuntu 24.04 (WSL) | zsh 5.9 as `sh` | 138/138 |
-| Ubuntu 24.04 (WSL) | zsh 5.9 as the hook shell | 139/139 |
-| Alpine 3.24 (container) | BusyBox 1.37 `ash` and tools | 119/119; no git, svn or node there |
+| Windows 11 | Git Bash (bash 5.3 as `sh`) | 156/156; Windows has no symlinks for the link cases |
+| Windows 11 | Windows PowerShell 5.1 | 150/150 |
+| Ubuntu 24.04 (WSL) | dash 0.5.12 | 145/145 |
+| Ubuntu 24.04 (WSL) | bash 5.2 as `sh` | 145/145 |
+| Ubuntu 24.04 (WSL) | zsh 5.9 as `sh` | 145/145 |
+| Ubuntu 24.04 (WSL) | zsh 5.9 as the hook shell | 146/146 |
+| Alpine 3.24 (container) | BusyBox 1.37 `ash` and tools | 126/126; no git, svn or node there |
 
-Run against the scripts as they were before the review of 25 November 2026, the same tests fail in
-39 places in dash, 66 with zsh as the hook shell and 27 in Windows PowerShell.
+Run against the scripts as they were before the review of 25 November 2026, the tests of that review
+failed in 39 places in dash, 66 with zsh as the hook shell and 27 in Windows PowerShell. The test
+for an edit that lands while a sync is running came a day later. It fails against the scripts of
+that review, in dash, BusyBox and Windows PowerShell, and passes now.
+
+The same was checked with real processes, in dash on Ubuntu: one process edited 600 skills, about
+one edit a millisecond, while two others ran sync after sync. When the edits stopped, one more sync
+had to bring every copy up to date. With the scripts of that review, 36, 78 and 30 copies stayed out
+of date in three rounds. With the scripts as they are now, none did.
 
 A manual check from cmd.exe on Windows 11 also passed, in a repository whose path has a space:
 
@@ -646,7 +660,8 @@ Not run yet:
 The hooks were also checked live in Claude Code 2.1.330 (Claude desktop on Windows 11), in throwaway
 repositories, with the previous layout. That layout kept the ignore rule in `.claude/skills/.gitignore`.
 The hook commands are the same today. The scripts have changed since, in the review of 25 November
-2026: how they walk folders, read the guard's event and report a sync that could not finish.
+2026: how they walk folders, read the guard's event and report a sync that could not finish. A day
+later the time stamp of a sync moved to before its look at the skills.
 
 - **Session start.** The skill was in Claude's list from the first prompt. The first sync took 6.8 s
   on a machine where security software makes each process start cost most of a second. A sync with
