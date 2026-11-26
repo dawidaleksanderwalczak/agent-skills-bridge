@@ -80,7 +80,8 @@ when one of them takes the place of a copy. That happens in two ways:
   `.agents/skills`. When you switch to the first branch, git puts its tracked files over the copy
   without a word, because git may overwrite what it ignores.
 - **By hand.** You delete a copy and put a folder of your own in its place. For example, a skill is
-  to be for Claude Code alone, and you move it from `.agents/skills` to `.claude/skills`.
+  to be for Claude Code alone, and you move it from `.agents/skills` to `.claude/skills`. A file
+  manager that moves the skill onto its copy does the same: it merges the two folders.
 
 So the bridge's records are not enough to tell. Before the bridge deletes or replaces a folder, it
 makes sure that the folder is still its copy. That is so while all of this holds:
@@ -90,7 +91,9 @@ makes sure that the folder is still its copy. That is so while all of this holds
    replaces that file too.
 3. The folder's skill is still in `.agents/skills`, or its `SKILL.md` is as the bridge copied it.
 4. git and svn track no file in it. The bridge asks them only about a folder that holds a file
-   newer than that `.gitignore`, which it writes last. Whatever a checkout writes is new.
+   which it did not put there. Such a file is newer than that `.gitignore`, which the bridge writes
+   last, or it can be written, while the bridge leaves its own files read-only. Whatever a checkout
+   writes is both.
 
 If one of them fails, the bridge leaves the folder as it is, says so once, and takes it off its
 records. The message starts with "`.claude/skills/<name>` is no longer the copy that the bridge
@@ -118,22 +121,31 @@ What this means in practice:
   the rest of the old copy, which nobody changed, and the bridge makes the copy again in its place.
 - **In a folder that the bridge left to git,** the copy's `.gitignore` stays behind, and so do the
   files of the copy that this branch does not have. Git ignores them, and every new file you put
-  there. If you work in that folder, delete that `.gitignore` first.
+  there: `git status` does not list it, and `git add` refuses it. The bridge's message says so. If
+  you work in that folder, delete that `.gitignore` first.
 - **A copy without the bridge's `.gitignore`** is no longer a copy. If you delete that file, you
   take the folder over, and git lists it from then on.
 - **`clean` follows the same rule.** It deletes the copies and leaves such a folder alone.
 
 The bridge can only be as sure as these signs are:
 
-- It asks git and svn only where the hook's shell finds them. Where it cannot ask, a tracked skill
-  is still safe when its skill is gone from `.agents/skills`, as on a branch from before the move.
-  A branch that has the skill in both places needs git.
-- It compares file times. A file that someone puts into a copy with an older time (`cp -p`, a
-  Windows copy, `tar`, `rsync -a`) does not count as new. Nor does one written in the very second
-  in which the copy was made, where the shell compares whole seconds: bash 3.2 on macOS, BusyBox.
+- It asks git and svn only where the hook's shell finds them, and a git that fails counts as none.
+  Where it cannot ask, a tracked skill is still safe when its skill is gone from `.agents/skills`,
+  as on a branch from before the move. A branch that has the skill in both places needs git.
+- While git is at work on the checkout, for example in the middle of a long `git checkout`, its
+  answer would be the one of the branch before. A sync that has to ask it then changes nothing and
+  says "git is at work in this checkout, so this sync waits for the next hook".
+- It goes by file times and by the read-only mark of its own files. A file that someone puts into
+  a copy read-only and with an older time does not count as theirs. For root every file can be
+  written, so there the bridge has the times alone: a file that keeps an older time (`cp -p`,
+  `tar`, `rsync -a`, a move) does not count as new then, nor does one written in the very second
+  in which the copy was made, where the shell compares whole seconds (BusyBox, bash 3.2).
 - After a sync that was killed, the copies it was about to delete or to make may be without their
   `.gitignore`, so the next sync does not ask them for it. A folder that you create under such a
   name before that next sync, and that git does not track, is replaced.
+- A copy whose `SKILL.md` you changed stays when you switch to a branch that does not have its
+  skill. When you switch back, the folder is a conflict: delete it, and the bridge makes the copy
+  again.
 - Until the next sync has looked, the guard still takes the folder for a copy and refuses Claude's
   edits in it.
 
@@ -617,7 +629,8 @@ Cursor staff on its forum. The record folder has no `SKILL.md`, so no tool loads
 | A skill is missing in Claude Code | Run `status`. For a brand-new checkout, accept the folder trust prompt: hooks run only in trusted folders. |
 | "Blocked by the agent-skills bridge" | Claude tried to edit a copy. It edits the named source file instead. |
 | "`.claude/skills/<name>` exists and was not made by the bridge" | A skill of the same name lives in `.claude/skills`. Move it to `.agents/skills`, or rename one of them. If the folder is no skill of yours but half a copy that a kit from before 26 November 2026 left behind when its sync was killed, delete the folder: the next hook copies the skill. A whole copy that is in no record is no conflict: the bridge takes it back by itself. |
-| "`.claude/skills/<name>` is no longer the copy that the bridge made" | A skill of your own has taken the place of a copy, and the bridge leaves it alone: see [Copies and skills of your own](#copies-and-skills-of-your-own). The message gives the reason. "git tracks it" or "svn tracks it": the folder belongs to the branch you are on. "Its `SKILL.md` is newer than that copy, and `.agents/skills/<name>` is gone": someone changed the file, or a checkout wrote it, and that text exists nowhere else, so it stays. "The `.gitignore` that the bridge wrote is not in it": someone replaced the folder, or deleted that file. "It is not a folder": a file has the copy's name. "git could not say whether it tracks it": git failed in this checkout, so run `git status` to see why. If you want the copy back, delete the folder: the next hook copies the skill. If you want the folder, there is nothing to do, unless `.agents/skills` has a skill of that name: then rename or delete one of them. |
+| "`.claude/skills/<name>` is no longer the copy that the bridge made" | A skill of your own has taken the place of a copy, and the bridge leaves it alone: see [Copies and skills of your own](#copies-and-skills-of-your-own). The message gives the reason. "git tracks it" or "svn tracks it": the folder belongs to the branch you are on. "Its `SKILL.md` is not the one that the bridge copied, and `.agents/skills/<name>` is gone": someone changed or replaced the file, or a checkout wrote it, and that text exists nowhere else, so it stays. "The `.gitignore` that the bridge wrote is not in it": someone replaced the folder, or deleted that file. "It is not a folder": a file has the copy's name. Where the copy's `.gitignore` is still in the folder, the message adds that it hides new files there from git: delete that file if you keep the folder. If you want the copy back, delete the folder: the next hook copies the skill. If you want the folder, there is nothing else to do, unless `.agents/skills` has a skill of that name: then rename or delete one of them. |
+| "git is at work in this checkout, so this sync waits for the next hook" | A sync had to ask git about a folder while git held the lock on its index (`index.lock`), as it does all through a checkout. Git's answer would have been the one of the branch before, so nothing was changed. The next hook does the work, and so does `sync`. `clean` says "try again when it is done". If the message stays, a git that crashed left its lock behind: `git status` says how to remove it. |
 | "Could not replace `.claude/skills/<name>`; is a file in it open?", or "Could not delete the old copy" | A program holds a file of the copy open; on Windows that blocks deleting it. Close the file. The next hook tries again, and so does `sync`. Until then `status` reports the copies as out of date. |
 | "Not everything in `.agents/skills` could be copied" | A skill holds a link to nowhere, a link loop or a file that you may not read. The rest of the skill is copied. Repair or remove that entry. For a file that could not be read, every hook tries again until it can be; a link to nowhere and a link loop are left out for good. |
 | "Skipped a folder in `.agents/skills`" | A skill folder has a name with a space or another character outside letters, digits, `.`, `_` and `-`. Rename it. The bridge says so once per session. |
@@ -711,10 +724,10 @@ cover:
   did not arrive;
 - a skill of your own that takes the place of a copy: put there by git, when you check out a branch
   that tracks it in `.claude/skills`, or moved there by hand, each with `sync` and with `clean`;
-- the cases next to it: a branch that has the skill in both places, a git that cannot answer, a
-  folder that git tracks under a name in another letter case, a copy whose `SKILL.md` was changed
-  before its skill went, a copy that only gained a file, and a file or an empty folder in the place
-  of a copy;
+- the cases next to it: a branch that has the skill in both places, a git that is at work, a git
+  that fails, a folder that git tracks under a name in another letter case, a skill that a file
+  manager moves over its copy, a copy whose `SKILL.md` was changed before its skill went, a copy
+  that only gained a file, and a file or an empty folder in the place of a copy;
 - the way back to the branch that has the skill in `.agents/skills`, where the copy is made again;
 - a sync that finds a skill of your own and is killed, records that the scripts of before left
   unfinished, and records that were lost;
@@ -734,13 +747,13 @@ Results on 26 November 2026:
 
 | System | Shell | Result |
 |---|---|---|
-| Windows 11 | Git Bash (bash 5.3 as `sh`) | 296/296; Windows has no symlinks for the link cases |
-| Windows 11 | Windows PowerShell 5.1 | 293/293 |
-| Ubuntu 24.04 (WSL) | dash 0.5.12 | 279/279 |
-| Ubuntu 24.04 (WSL) | bash 5.2 as `sh` | 279/279 |
-| Ubuntu 24.04 (WSL) | zsh 5.9 as `sh` | 279/279 |
-| Ubuntu 24.04 (WSL) | zsh 5.9 as the hook shell | 281/281 |
-| Alpine 3.24 (container) | BusyBox 1.37 `ash` and tools | 229/229; no git, svn or node there |
+| Windows 11 | Git Bash (bash 5.3 as `sh`) | 304/304; Windows has no symlinks for the link cases |
+| Windows 11 | Windows PowerShell 5.1 | 301/301 |
+| Ubuntu 24.04 (WSL) | dash 0.5.12 | 287/287 |
+| Ubuntu 24.04 (WSL) | bash 5.2 as `sh` | 287/287 |
+| Ubuntu 24.04 (WSL) | zsh 5.9 as `sh` | 287/287 |
+| Ubuntu 24.04 (WSL) | zsh 5.9 as the hook shell | 289/289 |
+| Alpine 3.24 (container) | BusyBox 1.37 `ash` and tools | 233/233; no git, svn or node there |
 
 Run against the scripts as they were before the review of 25 November 2026, the tests of that review
 failed in 39 places in dash, 66 with zsh as the hook shell and 27 in Windows PowerShell. The test
@@ -774,12 +787,14 @@ against the scripts from before both. The numbers are the same in all seven envi
 
 The tests for a skill of your own in the place of a copy came the same day: a branch that tracks
 the skill in `.claude/skills`, a move by hand, `clean` in both states, and a sync that is killed
-when it has just found such a skill. Against the scripts as they were until then, 37 checks fail in
-dash, with zsh as the hook shell and in Windows PowerShell, and 18 in BusyBox, which has no git and
+when it has just found such a skill. Against the scripts as they were until then, 40 checks fail in
+dash, with zsh as the hook shell and in Windows PowerShell, and 20 in BusyBox, which has no git and
 no svn. The two scripts were checked again on one checkout, and against each other's records of
-before, with 46 checks of their own. A sync still starts 7 programs to copy and 4 to delete, and a
-hook with nothing to do starts none. `docs/overview.md` says where the line runs between an edited
-copy and a skill of your own, and why.
+before, with 46 checks of their own. A sync and a `clean` of the shell script were also killed
+after every line that they pass through, 511 times in all: each time the next sync left your own
+skills where they were and finished the work. A sync still starts 7 programs to copy and 4 to
+delete, and a hook with nothing to do starts none. `docs/overview.md` says where the line runs
+between an edited copy and a skill of your own, and why.
 
 A manual check from cmd.exe on Windows 11 also passed, in a repository whose path has a space:
 

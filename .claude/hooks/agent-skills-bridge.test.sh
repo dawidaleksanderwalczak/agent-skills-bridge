@@ -927,8 +927,10 @@ check "and did not get to list it in the manifest" sh -c "! grep -qx gamma '$KS/
 st=$(bridge "$K" status 2>&1)
 check "status counts the new copy as the bridge's" contains "$st" 'copy(ies): alpha gamma'
 check "and names only the skill of someone's own as a conflict" contains "$st" 'conflicts       own (in'
-bridge "$K" guard '{"tool_name":"Edit","tool_input":{"file_path":"'"$(tool_path "$K/.claude/skills/gamma/SKILL.md")"'"}}' > /dev/null 2>&1
-check "an edit inside the new copy is refused" test $? = 2
+err=$(bridge "$K" guard '{"tool_name":"Edit","tool_input":{"file_path":"'"$(tool_path "$K/.claude/skills/gamma/SKILL.md")"'"}}' 2>&1)
+code=$?
+check "an edit inside the new copy is refused" test "$code" = 2
+check "and the refusal names the source file, also while the records are those of a sync that has begun" contains "$err" '.agents/skills/gamma/SKILL.md instead'
 sleep 1 # see 25
 touch -t 202001010000 "$KS/lock" # see 9
 out=$(bridge "$K" session 2>&1)
@@ -1201,6 +1203,7 @@ if command -v git > /dev/null 2>&1; then
   out=$(bridge "$O" session 2>&1)
   check "the hook leaves the tracked skill alone, with the edit that is not committed" grep -q 'not committed' "$O/.claude/skills/foo/SKILL.md"
   check "and says so" contains "$out" '.claude/skills/foo is no longer the copy that the bridge made'
+  check "it also says that the copy's .gitignore still hides new files there from git" contains "$out" 'Its .gitignore still hides new files there from git'
   check "git finds the skill as that branch has it, with the edit" test "$(go status --porcelain)" = ' M .claude/skills/foo/SKILL.md'
   check "the folder is off the bridge's records" sh -c '! grep -qx foo "$1/manifest" 2> /dev/null' x "$OS"
   settled "the next hook has nothing to do, and starts no program" "$O"
@@ -1242,14 +1245,22 @@ if command -v git > /dev/null 2>&1; then
   check "clean leaves the tracked skill alone too" grep -q 'not committed' "$O/.claude/skills/foo/SKILL.md"
   check "and says so" contains "$out" 'left .claude/skills/foo alone: it is no longer the copy that the bridge made'
   check "it deletes its records" test ! -e "$OS"
-  # A git that cannot say what it tracks: it does not trust the checkout, or its index is broken.
-  # Then the bridge cannot make sure, and keeps its hands off a folder that someone changed.
+  # While git checks a branch out, its index is still the one of the branch before, and it holds a
+  # lock on it from the first file to the last. Its answer would be wrong then, so the sync waits.
   go checkout -q -- .
   go checkout -q new
   bridge "$O" session > /dev/null 2>&1
   sleep 1 # see 6
   chmod u+w "$O/.claude/skills/foo/SKILL.md" 2> /dev/null
   echo 'An edit in the copy.' >> "$O/.claude/skills/foo/SKILL.md"
+  : > "$O/.git/index.lock"
+  out=$(bridge "$O" session 2>&1)
+  rm -f "$O/.git/index.lock"
+  check "while git is at work on the checkout, a sync that has to ask it touches nothing" grep -q 'An edit in the copy.' "$O/.claude/skills/foo/SKILL.md"
+  check "it says that it waits" contains "$out" 'git is at work in this checkout, so this sync waits for the next hook.'
+  check "and the folder stays on record" grep -qx foo "$OS/manifest"
+  # A git that fails in this checkout, because it does not trust it or is too old, tracks nothing
+  # that the bridge could ask about. The other signs decide then, as where there is no git.
   mkdir -p "$base/nogit"
   printf '#!/bin/sh\nexit 128\n' > "$base/nogit/git"
   chmod +x "$base/nogit/git"
@@ -1259,14 +1270,11 @@ if command -v git > /dev/null 2>&1; then
     export PATH
     bridge "$O" session
   ) 2>&1)
-  check "where git cannot say what it tracks, a changed folder is left alone" grep -q 'An edit in the copy.' "$O/.claude/skills/foo/SKILL.md"
-  check "and the hook says why" contains "$out" 'git could not say whether it tracks it'
+  check "where git fails, an edited copy is restored as where there is no git" sh -c '! grep -q "An edit in the copy." "$1"' x "$O/.claude/skills/foo/SKILL.md"
+  check "without a word about it" lacks "$out" 'no longer the copy'
   # Letter case: Windows and macOS take a folder in another letter case for the same one, so git's
   # files can lie in the copy's folder under such a name. The bridge cannot tell what the file
   # system does, so git's answer counts in any letter case.
-  chmod -R u+w "$O/.claude/skills/foo"
-  rm -rf "$O/.claude/skills/foo"
-  bridge "$O" session > /dev/null 2>&1
   sleep 1 # see 6
   chmod u+w "$O/.claude/skills/foo/SKILL.md" 2> /dev/null
   echo 'An edit in the copy.' >> "$O/.claude/skills/foo/SKILL.md"
@@ -1316,7 +1324,7 @@ echo 'Changed in the copy.' >> "$P/.claude/skills/gamma/SKILL.md"
 rm -rf "$P/.agents/skills/gamma"
 out=$(bridge "$P" session 2>&1)
 check "a copy with a changed SKILL.md stays when its skill is gone" grep -q 'Changed in the copy.' "$P/.claude/skills/gamma/SKILL.md"
-check "and the hook says why" contains "$out" 'its SKILL.md is newer than that copy, and .agents/skills/gamma is gone'
+check "and the hook says why" contains "$out" 'its SKILL.md is not the one that the bridge copied, and .agents/skills/gamma is gone'
 # A copy that only gained a file, as a script leaves one that runs in it, is still the bridge's.
 mkdir "$P/.claude/skills/delta/__pycache__"
 echo 'x' > "$P/.claude/skills/delta/__pycache__/run.pyc"
@@ -1348,6 +1356,24 @@ rm -rf "$P/.agents/skills/eta"
 out=$(bridge "$P" session 2>&1)
 check "the copy of a file with a time ahead of the clock is deleted with its skill" test ! -e "$P/.claude/skills/eta"
 check "like any other copy" lacks "$out" 'no longer the copy'
+# The move by hand once more, the way a file manager does it that merges two folders: the copy is
+# not deleted first, and each file of the skill lands on the copy's file of that name. The bridge's
+# .gitignore stays, and no file is new, because a move keeps the times. What tells is that the
+# files can be written: the bridge leaves every file of a copy read-only.
+if [ "$(id -u)" = 0 ]; then
+  echo "  skip the move over the files of a copy (root may write any file, so nothing tells)"
+else
+  skill "$P" iota
+  sleep 1 # see 1: the skill's file is older than its copy, also in whole seconds
+  bridge "$P" session > /dev/null 2>&1
+  chmod u+w "$P/.claude/skills/iota/SKILL.md" 2> /dev/null # a file manager asks, and then does this
+  mv -f "$P/.agents/skills/iota/SKILL.md" "$P/.claude/skills/iota/SKILL.md"
+  rmdir "$P/.agents/skills/iota"
+  check "the skill's file lies in the copy's folder, older than the copy, next to the bridge's .gitignore" sh -c 'test ! "$1/SKILL.md" -nt "$1/.gitignore" && grep -qx "\*" "$1/.gitignore"' x "$P/.claude/skills/iota"
+  out=$(bridge "$P" session 2>&1)
+  check "a skill whose files were moved over the files of its copy is left alone" grep -q 'Body of iota.' "$P/.claude/skills/iota/SKILL.md"
+  check "and the hook says why" contains "$out" '.claude/skills/iota is no longer the copy that the bridge made (its SKILL.md is not the one that the bridge copied, and .agents/skills/iota is gone)'
+fi
 # A skill that is renamed in letter case only, where the file system takes both names for one
 # folder. The PowerShell twin takes them for one name too, and its copy still says the name of
 # before. The shell script goes by the letter case, so the rename is another matter there.

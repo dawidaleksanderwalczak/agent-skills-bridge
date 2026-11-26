@@ -212,11 +212,11 @@ read_names() {
       case $line in
         "$unfinished_line"*)
           seen=1
-          rest=${line#"$unfinished_line"}
-          rest="$rest "
-          while [ -n "$rest" ]; do
-            u=${rest%% *}
-            rest=${rest#* }
+          words=${line#"$unfinished_line"}
+          words="$words "
+          while [ -n "$words" ]; do
+            u=${words%% *}
+            words=${words#* }
             if valid_name "$u"; then unfinished="$unfinished $u"; fi
           done
           continue
@@ -309,19 +309,32 @@ bare() {
 
 # True when the folder $1 holds something that the bridge did not put there: a file that is newer
 # than $2, the copy's own .gitignore, which the bridge writes last of all, or a link, which no copy
-# holds. A folder counts for nothing by itself: its time changes when a file in it goes, and that
-# leaves nothing of anyone's behind. A folder that cannot be read may hold anything.
+# holds. With $3 = 1, a file that can be written is no file of the bridge's either: see sealed. A
+# folder counts for nothing by itself: its time changes when a file in it goes, and that leaves
+# nothing of anyone's behind. A folder that cannot be read may hold anything.
 touched() {
   [ -r "$1" ] || return 0
   for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
     if [ -L "$e" ]; then return 0; fi
     if [ -d "$e" ]; then
-      if touched "$e" "$2"; then return 0; fi
-    elif [ -e "$e" ] && [ "$e" -nt "$2" ]; then
-      return 0
+      if touched "$e" "$2" "$3"; then return 0; fi
+    elif [ -e "$e" ]; then
+      if [ "$e" -nt "$2" ]; then return 0; fi
+      if [ "$3" = 1 ] && [ -w "$e" ]; then return 0; fi
     fi
   done
   return 1
+}
+
+# Sets seal to 1 when a file that can be written tells something about the copy of skill $1. The
+# bridge leaves every file of a copy read-only, its .gitignore among them. So a file there that can
+# be written was put there by someone else, also when it is older than the copy: a file manager
+# that moves a skill over its copy keeps the times. That holds only while the .gitignore itself is
+# still read-only. Where it can be written, the user may write anything (root), or the file system
+# keeps no such mark, and the sign says nothing.
+sealed() {
+  seal=0
+  [ -w "$dst/$1/.gitignore" ] || seal=1
 }
 
 # True when .claude/skills/$1 is a folder that holds nothing of anyone's: no entry at all, or a copy
@@ -331,7 +344,9 @@ touched() {
 leftover() {
   [ -d "$dst/$1" ] && [ ! -L "$dst/$1" ] || return 1
   bare "$dst/$1" && return 0
-  marked "$1" && ! touched "$dst/$1" "$dst/$1/.gitignore"
+  marked "$1" || return 1
+  sealed "$1"
+  ! touched "$dst/$1" "$dst/$1/.gitignore" "$seal"
 }
 
 # Sets wanted (skills to copy), stale (copies to refresh), gone (copies to delete), conflicts, and
@@ -373,17 +388,18 @@ plan() {
   for n in $managed; do has "$wanted" "$n" || gone="$gone $n"; done
 }
 
-# Sets rest to the words of the list $1 that the list $2 does not hold.
+# Sets others to the words of the list $1 that the list $2 does not hold.
 without() {
-  rest=
-  for w in $1; do has "$2" "$w" || rest="$rest $w"; done
+  others=
+  for w in $1; do has "$2" "$w" || others="$others $w"; done
 }
 
 # True when the folder the shell is in, or a folder above it, holds the entry $1: .git or .svn, by
-# which a checkout of git or svn is known. No process: git and svn are asked only where they are at
-# home.
+# which a checkout of git or svn is known. Sets d to that folder. git and svn are asked only where
+# they are at home. The folder is taken as the system knows it (pwd -P), as git does: the way the
+# shell came there may lead through a link.
 above() {
-  d=$PWD
+  d=$(pwd -P 2> /dev/null) || d=$PWD
   while :; do
     [ ! -e "${d%/}/$1" ] || return 0
     case $d in
@@ -395,37 +411,55 @@ above() {
   done
 }
 
+# True while git is at work on the checkout whose .git lies in the folder $d: it holds a lock on its
+# index then, from the first file of a checkout to the last. The index is in .git, or in the folder
+# that a .git file names (a worktree, a submodule).
+git_busy() {
+  gitdir=${d%/}/.git
+  if [ -f "$gitdir" ]; then
+    line=
+    { IFS= read -r line < "$gitdir"; } 2> /dev/null
+    line=${line%[[:cntrl:]]}
+    case $line in
+      'gitdir: '/* | 'gitdir: '[A-Za-z]:*) gitdir=${line#gitdir: } ;;
+      'gitdir: '*) gitdir=${d%/}/${line#gitdir: } ;;
+    esac
+  fi
+  [ -e "$gitdir/index.lock" ]
+}
+
 # Asks git and svn about the folders .claude/skills/<name> of the names in the arguments, with one
 # process each for git and for every folder that svn is asked about. Sets in_git and in_svn to the
-# names in whose folder they track something, and no_git to all the names when git is there and
-# cannot say (it trusts the checkout no longer, or its index is broken).
+# names in whose folder they track something. Sets busy to 1 when git is at work on the checkout
+# this moment: its index is still the one of before then, so its answer would be wrong. A git that
+# fails here (it does not trust the checkout, it is too old) is like no git: it tracks nothing that
+# the bridge could ask about, and the other signs decide.
 ask_vcs() {
   in_git=
   in_svn=
-  no_git=
   if above .git && command -v git > /dev/null 2>&1; then
+    if git_busy; then
+      busy=1
+      return 0
+    fi
     paths=
     for m in "$@"; do paths="$paths $dst/$m"; done
     # Letter case counts for nothing, in the question and in the answer: Windows and macOS take a
     # folder in another letter case for the same one, and the bridge cannot tell what the file
     # system here does (see do_guard).
     # shellcheck disable=SC2086 # relative paths built from validated names
-    if out=$(git --icase-pathspecs ls-files -- $paths 2> /dev/null); then
-      if [ -n "$out" ]; then
-        lower "$out"
-        out="$nl$l$nl"
-        lower "$*"
-        lows=$l
-        for m in "$@"; do
-          low=${lows%% *}
-          lows=${lows#* }
-          # A tracked file in the folder (git puts quotes around a name with unusual letters), or
-          # the name itself: a tracked link, or a file where the folder was.
-          case $out in *"$nl$dst/$low/"* | *"$nl\"$dst/$low/"* | *"$nl$dst/$low$nl"*) in_git="$in_git $m" ;; esac
-        done
-      fi
-    else
-      no_git="$*"
+    if out=$(git --icase-pathspecs ls-files -- $paths 2> /dev/null) && [ -n "$out" ]; then
+      lower "$out"
+      out="$nl$l$nl"
+      lower "$*"
+      lows=$l
+      for m in "$@"; do
+        low=${lows%% *}
+        lows=${lows#* }
+        # A tracked file in the folder (git puts quotes around a name with unusual letters), or the
+        # name itself: a tracked link, or a file where the folder was.
+        case $out in *"$nl$dst/$low/"* | *"$nl\"$dst/$low/"* | *"$nl$dst/$low$nl"*) in_git="$in_git $m" ;; esac
+      done
     fi
   fi
   if above .svn && command -v svn > /dev/null 2>&1; then
@@ -444,13 +478,14 @@ ask_vcs() {
 #     too. Only a folder that a sync may have left half-done ($doubt) can be without it.
 #   - Its skill is still in .agents/skills, or its SKILL.md is the one the bridge copied. A changed
 #     SKILL.md whose skill is gone could be restored from nowhere.
-#   - git and svn track nothing in it. They are asked only about a folder that holds a file newer
-#     than its .gitignore, or lacks that file: what a checkout writes is new, and git puts a tracked
-#     file over an ignored copy without a word.
+#   - git and svn track nothing in it. They are asked only about a folder that holds a file that the
+#     bridge did not put there (see touched), or lacks the .gitignore: what a checkout writes is new
+#     and can be written, and git puts a tracked file over an ignored copy without a word.
 # Whatever else differs in a folder with that .gitignore is an edit of a copy: the bridge restores
 # it. Sets taken to the names whose folder is no longer the bridge's copy, and takes them out of
 # $gone, $stale and $wanted: the bridge leaves these folders alone, and its next manifest does not
-# list them. reason says why.
+# list them. reason says why. Sets busy to 1 when git had to be asked and is at work this moment:
+# then nothing is decided, and the caller waits for the next hook.
 own() {
   taken=
   why_file=
@@ -458,8 +493,8 @@ own() {
   why_skill=
   why_git=
   why_svn=
-  why_ask=
   ask=
+  busy=0
   for n in $gone $stale; do
     has "$managed" "$n" || continue # a new copy: no folder is there, or a leftover
     c=$dst/$n
@@ -473,54 +508,64 @@ own() {
       : # an empty folder is nobody's work
     elif ! marked "$n"; then
       if has "$doubt" "$n"; then ask="$ask $n"; else why_mark="$why_mark $n"; fi
-    elif touched "$c" "$c/.gitignore"; then
-      if has "$gone" "$n" && [ -f "$c/SKILL.md" ] && [ "$c/SKILL.md" -nt "$c/.gitignore" ]; then
-        why_skill="$why_skill $n"
-      else
-        ask="$ask $n"
+    else
+      # A sync that was killed may have left its copy before it made the files read-only.
+      seal=0
+      has "$doubt" "$n" || sealed "$n"
+      if touched "$c" "$c/.gitignore" "$seal"; then
+        if has "$gone" "$n" && [ -f "$c/SKILL.md" ] &&
+          { [ "$c/SKILL.md" -nt "$c/.gitignore" ] || { [ "$seal" = 1 ] && [ -w "$c/SKILL.md" ]; }; }; then
+          why_skill="$why_skill $n"
+        else
+          ask="$ask $n"
+        fi
       fi
     fi
   done
   if [ -n "$ask" ]; then
     # shellcheck disable=SC2086 # validated names
     ask_vcs $ask
+    [ "$busy" = 0 ] || return 0
     for n in $ask; do
       if has "$in_git" "$n"; then
         why_git="$why_git $n"
       elif has "$in_svn" "$n"; then
         why_svn="$why_svn $n"
-      elif has "$no_git" "$n"; then
-        why_ask="$why_ask $n"
       fi
     done
   fi
-  whys="$why_file$why_mark$why_skill$why_git$why_svn$why_ask"
+  whys="$why_file$why_mark$why_skill$why_git$why_svn"
   [ -n "$whys" ] || return 0
   for n in $gone $stale; do
     if has "$whys" "$n"; then taken="$taken $n"; fi
   done
   without "$gone" "$taken"
-  gone=$rest
+  gone=$others
   without "$stale" "$taken"
-  stale=$rest
+  stale=$others
   without "$wanted" "$taken"
-  wanted=$rest
+  wanted=$others
 }
 
-# Sets why to the reason for which own took .claude/skills/$1 for a folder that is not the bridge's.
+# Sets why to the reason for which own took .claude/skills/$1 for a folder that is not the bridge's,
+# and hint to one more sentence for whoever keeps that folder.
 reason() {
+  hint=
   if has "$why_file" "$1"; then
     why='it is not a folder'
   elif has "$why_mark" "$1"; then
     why='the .gitignore that the bridge wrote is not in it'
   elif has "$why_skill" "$1"; then
-    why="its SKILL.md is newer than that copy, and .agents/skills/$1 is gone"
+    why="its SKILL.md is not the one that the bridge copied, and .agents/skills/$1 is gone"
   elif has "$why_git" "$1"; then
     why='git tracks it'
-  elif has "$why_svn" "$1"; then
-    why='svn tracks it'
   else
-    why='git could not say whether it tracks it'
+    why='svn tracks it'
+  fi
+  # The copy's .gitignore stays in a folder that the bridge leaves alone, and goes on hiding what is
+  # new there from git.
+  if marked "$1" && above .git; then
+    hint=' Its .gitignore still hides new files there from git: delete that file if you work in the folder.'
   fi
 }
 
@@ -593,7 +638,7 @@ copy_skills() {
       # No folder was there when the sync looked: someone made this one meanwhile, so it is theirs.
       note ".claude/skills/$n exists and was not made by the bridge, so .agents/skills/$n is not copied. Rename or delete one of them."
       without "$wanted" "$n"
-      wanted=$rest
+      wanted=$others
     fi
   done
   partial=0
@@ -671,7 +716,7 @@ begin_sync() {
   {
     printf '%s\n' "$unfinished_line$gone$stale" \
       '# A sync began here and has not ended. Above: the copies that it was about to delete or to make. Below: every copy of the bridge.' \
-      $rest $new > "$stamp"
+      $others $new > "$stamp"
   } 2> /dev/null
 }
 
@@ -725,12 +770,17 @@ do_sync() {
   [ -n "$stale$gone" ] || return 0
   # No folder is deleted or replaced that is not the bridge's own copy any more.
   own
+  if [ "$busy" = 1 ]; then
+    # Nothing is written yet, so the next hook finds everything as this one did.
+    note "git is at work in this checkout, so this sync waits for the next hook."
+    return 0
+  fi
   for n in $taken; do
     reason "$n"
     if has "$src_names" "$n"; then
-      note ".claude/skills/$n is no longer the copy that the bridge made ($why). The bridge leaves it alone, so .agents/skills/$n is not copied. Rename or delete one of them."
+      note ".claude/skills/$n is no longer the copy that the bridge made ($why). The bridge leaves it alone, so .agents/skills/$n is not copied. Rename or delete one of them.$hint"
     else
-      note ".claude/skills/$n is no longer the copy that the bridge made ($why). The bridge leaves it alone."
+      note ".claude/skills/$n is no longer the copy that the bridge made ($why). The bridge leaves it alone.$hint"
     fi
   done
   # No copy is made that is not on record.
@@ -931,7 +981,7 @@ do_status() {
   plan
   own # as the next sync will: it may ask git or svn
   without "$managed" "$taken"
-  managed=$rest
+  managed=$others
   echo "agent-skills bridge: $PWD"
   # shellcheck disable=SC2086 # names are validated words
   set -- $src_names
@@ -944,6 +994,7 @@ do_status() {
     reason "$n"
     echo "  left alone      $n: no longer the copy that the bridge made ($why). The next sync takes it off the records"
   done
+  [ "$busy" = 0 ] || echo "  git             at work in this checkout: a sync waits until it is done"
   if [ -z "$stale$gone" ]; then
     echo "  state           copies are current"
   else
@@ -985,6 +1036,10 @@ do_clean() {
     if has "$src_names" "$n"; then stale="$stale $n"; else gone="$gone $n"; fi
   done
   own
+  if [ "$busy" = 1 ]; then
+    echo "agent-skills bridge: git is at work in this checkout; try again when it is done." >&2
+    exit 1
+  fi
   # As a sync does, clean first puts on record which folders it is about to delete. Should it be
   # killed, or should a folder stay, the next sync knows that these may be half-deleted.
   begin_sync
@@ -1010,7 +1065,7 @@ do_clean() {
   fi
   for n in $taken; do
     reason "$n"
-    echo "agent-skills bridge: left .claude/skills/$n alone: it is no longer the copy that the bridge made ($why)."
+    echo "agent-skills bridge: left .claude/skills/$n alone: it is no longer the copy that the bridge made ($why).$hint"
   done
 }
 

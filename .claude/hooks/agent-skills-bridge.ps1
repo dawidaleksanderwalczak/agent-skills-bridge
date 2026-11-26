@@ -347,18 +347,29 @@ function Test-Bare([string]$Folder) {
 
 # True when the folder $Folder holds something that the bridge did not put there: a file that is
 # newer than $Mark, the time of the copy's own .gitignore, which the bridge writes last of all, or
-# a link, which no copy holds. A folder counts for nothing by itself: its time changes when a file
-# in it goes, and that leaves nothing of anyone's behind. A folder that cannot be read may hold
-# anything.
-function Test-Touched([string]$Folder, [DateTime]$Mark) {
+# a link, which no copy holds. With $Seal, a file that can be written is no file of the bridge's
+# either: see Test-Sealed. A folder counts for nothing by itself: its time changes when a file in it
+# goes, and that leaves nothing of anyone's behind. A folder that cannot be read may hold anything.
+function Test-Touched([string]$Folder, [DateTime]$Mark, [bool]$Seal) {
   try { $entries = ([IO.DirectoryInfo]$Folder).GetFileSystemInfos() }
   catch { return $true }
   foreach ($e in $entries) {
     if (Test-LinkItem $e) { return $true }
-    if ($e -is [IO.DirectoryInfo]) { if (Test-Touched $e.FullName $Mark) { return $true } }
-    elseif ($e.LastWriteTimeUtc -gt $Mark) { return $true }
+    if ($e -is [IO.DirectoryInfo]) { if (Test-Touched $e.FullName $Mark $Seal) { return $true } }
+    elseif ($e.LastWriteTimeUtc -gt $Mark -or ($Seal -and -not $e.IsReadOnly)) { return $true }
   }
   return $false
+}
+
+# True when a file that can be written tells something about the copy of the skill $Name. The
+# bridge leaves every file of a copy read-only, its .gitignore among them. So a file there that can
+# be written was put there by someone else, also when it is older than the copy: a file manager
+# that moves a skill over its copy keeps the times. That holds only while the .gitignore itself is
+# still read-only. Where it is not, someone has lifted the mark from the whole folder, and the sign
+# says nothing.
+function Test-Sealed([string]$Name) {
+  $item = Get-Item -LiteralPath (Join-Path (Join-Path $dst $Name) '.gitignore') -Force -ErrorAction SilentlyContinue
+  return [bool]($item -and ($item -is [IO.FileInfo]) -and $item.IsReadOnly)
 }
 
 # True when .claude/skills/$Name is a folder that holds nothing of anyone's: no entry at all, or a
@@ -371,7 +382,7 @@ function Test-Leftover([string]$Name) {
   if (-not $item -or ($item -isnot [IO.DirectoryInfo]) -or (Test-LinkItem $item)) { return $false }
   if (Test-Bare $folder) { return $true }
   if (-not (Test-Marked $Name)) { return $false }
-  return -not (Test-Touched $folder (Get-WriteTime (Join-Path $folder '.gitignore')))
+  return -not (Test-Touched $folder (Get-WriteTime (Join-Path $folder '.gitignore')) (Test-Sealed $Name))
 }
 
 # Works out what to copy (Wanted), refresh (Stale), delete (Gone) and leave alone (Conflicts), and
@@ -381,7 +392,7 @@ function Get-Plan {
   $records = Read-Records
   $plan = @{
     Source = (Get-SourceNames); Managed = $records.Managed; Doubt = $records.Doubt
-    Wanted = @(); Stale = @(); Gone = @(); Conflicts = @(); Adopted = @(); Taken = @(); Why = @{}
+    Wanted = @(); Stale = @(); Gone = @(); Conflicts = @(); Adopted = @(); Taken = @(); Why = @{}; Busy = $false
   }
   $stampTime = [DateTime]::MinValue
   $manifestTime = [DateTime]::MaxValue
@@ -414,24 +425,44 @@ function Get-Plan {
   return $plan
 }
 
-# True when the repository folder, or a folder above it, holds the entry $Entry: .git or .svn, by
-# which a checkout of git or svn is known. git and svn are asked only where they are at home.
-function Test-Above([string]$Entry) {
+# The repository folder, or the folder above it, that holds the entry $Entry: .git or .svn, by which
+# a checkout of git or svn is known. Nothing when there is none. git and svn are asked only where
+# they are at home.
+function Find-Above([string]$Entry) {
   $folder = $root
   while ($folder) {
-    if (Test-Exists (Join-Path $folder $Entry)) { return $true }
+    if (Test-Exists (Join-Path $folder $Entry)) { return $folder }
     $folder = [IO.Path]::GetDirectoryName($folder)
   }
-  return $false
+}
+
+# True while git is at work on the checkout whose .git lies in $Folder: it holds a lock on its index
+# then, from the first file of a checkout to the last. The index is in .git, or in the folder that a
+# .git file names (a worktree, a submodule).
+function Test-GitBusy([string]$Folder) {
+  $gitDir = Join-Path $Folder '.git'
+  if (Test-Path -LiteralPath $gitDir -PathType Leaf) {
+    $line = ''
+    try { $line = [string](@([IO.File]::ReadAllLines($gitDir))[0]) } catch { }
+    if ($line.StartsWith('gitdir: ', [StringComparison]::Ordinal)) {
+      $gitDir = $line.Substring(8).Trim()
+      if (-not [IO.Path]::IsPathRooted($gitDir)) { $gitDir = Join-Path $Folder $gitDir }
+    }
+  }
+  return (Test-Exists (Join-Path $gitDir 'index.lock'))
 }
 
 # Asks git and svn about the folders .claude/skills/<name> of $Names, with one process each for git
 # and for every folder that svn is asked about. Git and Svn: the names in whose folder they track
-# something. Untold: all the names when git is there and cannot say (it trusts the checkout no
-# longer, or its index is broken).
+# something. Busy: git is at work on the checkout this moment. Its index is still the one of before
+# then, so its answer would be wrong. A git that fails here (it does not trust the checkout, it is
+# too old) is like no git: it tracks nothing that the bridge could ask about, and the other signs
+# decide.
 function Get-Tracked([string[]]$Names) {
-  $tracked = @{ Git = @(); Svn = @(); Untold = @() }
-  if ((Test-Above '.git') -and (Get-Command git -ErrorAction SilentlyContinue)) {
+  $tracked = @{ Git = @(); Svn = @(); Busy = $false }
+  $checkout = Find-Above '.git'
+  if ($checkout -and (Get-Command git -ErrorAction SilentlyContinue)) {
+    if (Test-GitBusy $checkout) { $tracked.Busy = $true; return $tracked }
     # Letter case counts for nothing, in the question and in the answer: Windows takes a folder in
     # another letter case for the same one.
     $answer = Invoke-Tool git (@('-C', $root, '--icase-pathspecs', 'ls-files', '--') + @($Names | ForEach-Object { ".claude/skills/$_" }))
@@ -446,14 +477,22 @@ function Get-Tracked([string[]]$Names) {
         }
       }
     }
-    else { $tracked.Untold = $Names }
   }
-  if ((Test-Above '.svn') -and (Get-Command svn -ErrorAction SilentlyContinue)) {
+  if ((Find-Above '.svn') -and (Get-Command svn -ErrorAction SilentlyContinue)) {
     foreach ($n in $Names) {
       if ((Invoke-Tool svn @('info', (Join-Path $dst $n))).Code -eq 0) { $tracked.Svn += $n }
     }
   }
   return $tracked
+}
+
+# One more sentence for whoever keeps the folder .claude/skills/$Name, which the bridge leaves alone:
+# the copy's .gitignore stays in it, and goes on hiding what is new there from git.
+function Get-Hint([string]$Name) {
+  if ((Test-Marked $Name) -and (Find-Above '.git')) {
+    return ' Its .gitignore still hides new files there from git: delete that file if you work in the folder.'
+  }
+  return ''
 }
 
 # Before the bridge deletes or replaces a folder, it makes sure that the folder still is the copy
@@ -465,17 +504,19 @@ function Get-Tracked([string[]]$Names) {
 #     too. Only a folder that a sync may have left half-done (Doubt) can be without it.
 #   - Its skill is still in .agents/skills, or its SKILL.md is the one the bridge copied. A changed
 #     SKILL.md whose skill is gone could be restored from nowhere.
-#   - git and svn track nothing in it. They are asked only about a folder that holds a file newer
-#     than its .gitignore, or lacks that file: what a checkout writes is new, and git puts a tracked
-#     file over an ignored copy without a word.
+#   - git and svn track nothing in it. They are asked only about a folder that holds a file that the
+#     bridge did not put there (see Test-Touched), or lacks the .gitignore: what a checkout writes is
+#     new and can be written, and git puts a tracked file over an ignored copy without a word.
 # Whatever else differs in a folder with that .gitignore is an edit of a copy: the bridge restores
 # it. Sets Taken to the names whose folder is no longer the bridge's copy, and takes them out of
 # Gone, Stale and Wanted: the bridge leaves these folders alone, and its next manifest does not
-# list them. Why says why, name by name.
+# list them. Why says why, name by name. Sets Busy when git had to be asked and is at work this
+# moment: then nothing is decided, and the caller waits for the next hook.
 function Select-Own($Plan) {
   $why = @{}
   $ask = @()
   $work = @($Plan.Gone) + @($Plan.Stale)
+  $Plan.Busy = $false
   foreach ($n in $work) {
     if ($Plan.Managed -notcontains $n) { continue } # a new copy: no folder is there, or a leftover
     $folder = Join-Path $dst $n
@@ -490,10 +531,13 @@ function Select-Own($Plan) {
     }
     else {
       $mark = Get-WriteTime (Join-Path $folder '.gitignore')
-      if (Test-Touched $folder $mark) {
+      # A sync that was killed may have left its copy before it made the files read-only.
+      $seal = ($Plan.Doubt -notcontains $n) -and (Test-Sealed $n)
+      if (Test-Touched $folder $mark $seal) {
         $skill = Get-Item -LiteralPath (Join-Path $folder 'SKILL.md') -Force -ErrorAction SilentlyContinue
-        if (($Plan.Gone -contains $n) -and ($skill -is [IO.FileInfo]) -and ($skill.LastWriteTimeUtc -gt $mark)) {
-          $why[$n] = "its SKILL.md is newer than that copy, and .agents/skills/$n is gone"
+        if (($Plan.Gone -contains $n) -and ($skill -is [IO.FileInfo]) -and
+          (($skill.LastWriteTimeUtc -gt $mark) -or ($seal -and -not $skill.IsReadOnly))) {
+          $why[$n] = "its SKILL.md is not the one that the bridge copied, and .agents/skills/$n is gone"
         }
         else { $ask += $n }
       }
@@ -501,10 +545,10 @@ function Select-Own($Plan) {
   }
   if ($ask.Count) {
     $tracked = Get-Tracked $ask
+    if ($tracked.Busy) { $Plan.Busy = $true; return }
     foreach ($n in $ask) {
       if ($tracked.Git -contains $n) { $why[$n] = 'git tracks it' }
       elseif ($tracked.Svn -contains $n) { $why[$n] = 'svn tracks it' }
-      elseif ($tracked.Untold -contains $n) { $why[$n] = 'git could not say whether it tracks it' }
     }
   }
   $Plan.Why = $why
@@ -672,10 +716,15 @@ function Invoke-Sync {
     if (($plan.Stale.Count + $plan.Gone.Count) -eq 0) { return }
     # No folder is deleted or replaced that is not the bridge's own copy any more.
     Select-Own $plan
+    if ($plan.Busy) {
+      # Nothing is written yet, so the next hook finds everything as this one did.
+      Add-Note 'git is at work in this checkout, so this sync waits for the next hook.'
+      return
+    }
     foreach ($n in $plan.Taken) {
       $text = ".claude/skills/$n is no longer the copy that the bridge made ($($plan.Why[$n])). The bridge leaves it alone"
-      if ($plan.Source -contains $n) { Add-Note "$text, so .agents/skills/$n is not copied. Rename or delete one of them." }
-      else { Add-Note "$text." }
+      if ($plan.Source -contains $n) { Add-Note "$text, so .agents/skills/$n is not copied. Rename or delete one of them.$(Get-Hint $n)" }
+      else { Add-Note "$text.$(Get-Hint $n)" }
     }
     # The stamp of a sync that has begun goes into the records. Unlike the stamp of a sync that has
     # ended, it holds text and is newer than the manifest: a sync that is killed midway counts as
@@ -854,6 +903,7 @@ function Show-Status {
   foreach ($n in $plan.Taken) {
     "  left alone      ${n}: no longer the copy that the bridge made ($($plan.Why[$n])). The next sync takes it off the records"
   }
+  if ($plan.Busy) { '  git             at work in this checkout: a sync waits until it is done' }
   if (($plan.Stale.Count + $plan.Gone.Count) -eq 0) { '  state           copies are current' }
   else {
     $gone = ''
@@ -903,12 +953,16 @@ function Invoke-Clean {
     $plan.Stale = @($plan.Managed | Where-Object { $plan.Source -contains $_ })
     Select-Own $plan
     $mine = @($plan.Managed | Where-Object { $plan.Taken -notcontains $_ })
-    # As a sync does, clean first puts on record which folders it is about to delete. Should it be
-    # killed, or should a folder stay, the next sync knows that these may be half-deleted.
-    try { [IO.File]::WriteAllText($stamp, (Get-BegunText (@($plan.Gone) + @($plan.Stale)) $mine), $utf8) } catch { }
-    $stuck = @($mine | Where-Object { -not (Remove-Copy $_) })
+    $stuck = @()
+    if (-not $plan.Busy) {
+      # As a sync does, clean first puts on record which folders it is about to delete. Should it be
+      # killed, or should a folder stay, the next sync knows that these may be half-deleted.
+      try { [IO.File]::WriteAllText($stamp, (Get-BegunText (@($plan.Gone) + @($plan.Stale)) $mine), $utf8) } catch { }
+      $stuck = @($mine | Where-Object { -not (Remove-Copy $_) })
+    }
   }
   finally { Exit-Lock }
+  if ($plan.Busy) { Write-Line 'agent-skills bridge: git is at work in this checkout; try again when it is done.' -Stderr; exit 1 }
   if ($stuck.Count) {
     # The records stay: without them the bridge would take what is left for someone else's skills.
     Write-Line "agent-skills bridge: could not delete: $($stuck -join ' '). Is a file in there open? Close it and run clean again." -Stderr
@@ -918,7 +972,7 @@ function Invoke-Clean {
   if ($mine.Count) { "agent-skills bridge: deleted the copies: $($mine -join ' ')." }
   else { 'agent-skills bridge: no copies to delete.' }
   foreach ($n in $plan.Taken) {
-    "agent-skills bridge: left .claude/skills/$n alone: it is no longer the copy that the bridge made ($($plan.Why[$n]))."
+    "agent-skills bridge: left .claude/skills/$n alone: it is no longer the copy that the bridge made ($($plan.Why[$n])).$(Get-Hint $n)"
   }
 }
 
