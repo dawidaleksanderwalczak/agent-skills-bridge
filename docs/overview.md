@@ -129,7 +129,7 @@ set \' ; ASB_CMD=session . "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridg
 ```
 
 - **POSIX shell.** `\'` is a literal quote. The shell sources the script and exits, and the rest is a
-  comment.
+  comment. Should the hook shell be zsh, the script puts it into `sh` emulation first.
 - **PowerShell.** `\'...#'` is one quoted argument to `Set-Variable`, so the POSIX half is inert.
   PowerShell runs the `.ps1` file and passes its exit code on.
 - **cmd.exe.** A hook's `shell` setting accepts only `bash` and `powershell`, and
@@ -137,8 +137,8 @@ set \' ; ASB_CMD=session . "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridg
   for Git Bash in `CLAUDE_CODE_GIT_BASH_PATH`, then in the standard Git folders, then in the Git
   installation of the `git` on PATH (read in the 2.1.330 program).
 - **Tested** the way Claude Code spawns each shell, including stdin, exit code 2 and paths with
-  spaces. The shells: Git Bash, Windows PowerShell 5.1, dash, bash and zsh as `sh`, and BusyBox `ash`.
-  The hook commands were also run from cmd.exe (section 8).
+  spaces. The shells: Git Bash, Windows PowerShell 5.1, dash, bash and zsh as `sh`, zsh under its own
+  name, and BusyBox `ash`. The hook commands were also run from cmd.exe (section 8).
 
 ### 4.4 Safety properties
 
@@ -149,7 +149,15 @@ set \' ; ASB_CMD=session . "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridg
   PowerShell 5.1's `Remove-Item -Recurse` and some Java tools delete *through* junctions.
 - **Copies are read-only and self-healing.** A copy that was edited or deleted is restored at the next
   sync. That includes a copy whose `.gitignore` was deleted.
-- **Edits are redirected.** The guard refuses Claude's edits to a copy and names the source file.
+- **Links in a skill are followed, loops are not.** A copy holds plain files and folders. A link to
+  nowhere, a link loop or a file that cannot be read is left out and reported, and the rest of the
+  skill is copied.
+- **An unfinished sync never passes for current.** If a copy cannot be replaced or deleted, for
+  example because a program holds one of its files open, the bridge says so and the next hook tries
+  again.
+- **Edits are redirected.** The guard refuses Claude's edits to a copy and names the source file. It
+  knows the usual spellings of a path: relative, with `.` and `..`, in another letter case, and the
+  Git Bash and network forms.
 - **Concurrent runs are safe.** A lock serialises them. A lock left by a killed run expires after two
   minutes.
 - **It fails open.** A broken bridge never blocks a session or an edit. Problems reach the user as a
@@ -170,8 +178,9 @@ set \' ; ASB_CMD=session . "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridg
 - **Something changed.** About seven processes, whatever the number of skills, because the copy runs
   as one batch. The first sync of a new checkout took 6.8 s on that slow Windows machine.
 - **The guard.** For Edit, Claude Code's `if` filter skips it for every file outside `.claude/skills`.
-  That filter can't match Write or NotebookEdit, so the guard starts on each of those calls and exits
-  at once.
+  A hook's `if` holds one rule, and that rule matches only the Edit tool. So for Write, NotebookEdit
+  and MultiEdit the guard starts on each call and exits at once, without starting a program of its
+  own.
 
 ---
 
@@ -182,8 +191,8 @@ set \' ; ASB_CMD=session . "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridg
 | Windows with Git Bash | `sh` script in Git Bash | tests pass; live-checked in Claude desktop |
 | Windows without Git Bash | PowerShell twin | tests pass on Windows PowerShell 5.1; PowerShell 7 not run |
 | Windows, people who work in cmd | Hooks still run in Git Bash or PowerShell, never cmd. By hand: the PowerShell command in section 6 | checked from cmd.exe (section 8) |
-| Linux | `sh` script | tests pass with dash (Debian, Ubuntu), bash as `sh` (Fedora, RHEL, Arch), zsh as `sh` and BusyBox (Alpine, containers) |
-| macOS | `sh` script (bash 3.2) | bash 3.2's known pitfalls are handled (see section 8); not run on a Mac |
+| Linux | `sh` script | tests pass with dash (Debian, Ubuntu), bash as `sh` (Fedora, RHEL, Arch), zsh as `sh`, zsh as the hook shell, and BusyBox (Alpine, containers) |
+| macOS | `sh` script (bash 3.2, or zsh if that is the hook shell) | bash 3.2's known pitfalls are handled (see section 8), and zsh is tested on Linux; not run on a Mac |
 | git | each copy ignores itself; `.claude/hooks/.gitattributes` keeps the script LF | tested, including a clone with `core.autocrlf=true` |
 | svn | `svn:ignore *` on `.claude/skills`, `svn:eol-style LF` on the script | tested |
 | An existing `.claude` folder | settings merged by hand; everything else untouched | tested in git and svn (section 6) |
@@ -311,10 +320,15 @@ The tests run the exact hook commands from `.claude/settings.json`, the way Clau
 They cover:
 
 - the first sync, edits, removals (including a sync that only deletes) and conflicts;
+- a sync with nothing to do, which must start no program;
 - read-only copies, and repair after tampering or deletion;
-- the guard, for Edit, Write and NotebookEdit and for other letter cases;
-- symlinks, junctions and link loops;
-- a stale lock, the kill switch, and paths with spaces;
+- the guard, for Edit, Write, NotebookEdit and MultiEdit: relative paths, `.` and `..`, other letter
+  cases, the Git Bash and network spellings, and events with blanks in their JSON;
+- symlinks, junctions and link loops in a skill, links to nowhere, and a junction inside a copy;
+- a copy that cannot be replaced or deleted, and files that cannot be copied;
+- a stale lock, the kill switch, and paths with spaces, with a letter outside ASCII, and on a network
+  share;
+- files saved with CRLF, read-only folders, `CDPATH`, and zsh with an alias from `.zshenv`;
 - `status` and `clean`;
 - git: an existing `.claude/skills` with its own skill and `.gitignore`. Git sees the native skill's
   files but no copy and no record. `status` spots a copy that lost its `.gitignore`, and `sync`
@@ -326,12 +340,44 @@ They cover:
 
 | Platform | Result |
 |---|---|
-| Windows 11, Git Bash | 77 / 77 passed (Windows has no symlinks for the link cases) |
-| Windows 11, Windows PowerShell 5.1 | 77 / 77 passed |
-| Ubuntu 24.04 (WSL2), dash | 78 / 78 passed |
-| Ubuntu 24.04 (WSL2), bash 5.2 as `sh` | 78 / 78 passed |
-| Ubuntu 24.04 (WSL2), zsh 5.9 as `sh` | 78 / 78 passed |
-| Alpine 3.24 container, BusyBox 1.37 | 59 / 59 passed (no git or svn in the image) |
+| Windows 11, Git Bash | 149 / 149 passed (Windows has no symlinks for the link cases) |
+| Windows 11, Windows PowerShell 5.1 | 143 / 143 passed |
+| Ubuntu 24.04 (WSL2), dash | 138 / 138 passed |
+| Ubuntu 24.04 (WSL2), bash 5.2 as `sh` | 138 / 138 passed |
+| Ubuntu 24.04 (WSL2), zsh 5.9 as `sh` | 138 / 138 passed |
+| Ubuntu 24.04 (WSL2), zsh 5.9 as the hook shell | 139 / 139 passed |
+| Alpine 3.24 container, BusyBox 1.37 | 119 / 119 passed (no git, svn or node in the image) |
+
+A case that needs something the system lacks is skipped: symlinks and file modes on Windows, junctions
+and network paths elsewhere.
+
+### Code review (25 November 2026)
+
+A reviewer went through the kit platform by platform. A second, adversarial review of the fixes
+followed, with every finding reproduced before it was accepted. All of the findings below are fixed,
+and each has a test that fails on the earlier scripts: 39 checks fail there in dash, 66 with zsh as
+the hook shell and 27 in Windows PowerShell.
+
+| Finding | Fix |
+|---|---|
+| zsh as the hook shell splits no words and fails on a pattern without a match, so nothing was copied. | The script puts zsh into `sh` emulation and turns alias expansion off. |
+| dash misread a manifest or a `SKILL.md` saved with CRLF, and took the bridge's own copies for someone else's. | Carriage returns are dropped in every shell, without a process. |
+| `CDPATH` could send `cd` to another folder. | The script clears it. |
+| Linux: a read-only folder in a skill made its copy impossible to replace. | The bridge makes such a copy writable before it deletes it. |
+| The guard missed paths with `.` or `..`, relative paths, Git Bash's `/c/...`, network paths, another letter case in the skill's name, and events with blanks in their JSON. | Both guards bring the path into one form first. A relative path counts from the folder the event names. |
+| MultiEdit sat behind an `if` filter that matches only Edit. | It moved to the guard entry without a filter. |
+| PowerShell: a junction loop in a skill sent `-Recurse` down to the path limit and left a nested copy. An edit behind a junction went unnoticed. | The twin walks folders itself. It follows the links in a skill and leaves a loop out. |
+| PowerShell: in a OneDrive folder every file and folder counted as a link, so the bridge did nothing there. | Only junctions and symbolic links count as links. |
+| PowerShell: stdin and stdout went through the console code page, so a letter outside ASCII in the repository path broke the guard and the watch path. | The twin reads and writes UTF-8. |
+| Both: a copy that could not be replaced, because a file in it was open, stayed half deleted and passed for current. A skill whose `SKILL.md` could not be read left a half copy. | Such a sync counts as unfinished and the next hook repeats it. Half copies are deleted. `clean` keeps its records until every copy is gone. |
+| dash and BusyBox: a link to nowhere in a skill made every hook copy that skill again. | Such a link counts for nothing, and is reported once when the skill is copied. |
+
+Two limits remain, both outside what Claude Code sends:
+
+- The guard compares spellings. A `\\?\` path, a short 8.3 name or a link that leads into a copy gets
+  past it; the next sync then replaces the edited copy.
+- The shell guard finds the path with string operations. Claude Code puts the path first in an
+  event. If it came after a very large value, the guard would need seconds per 100 KB to find it.
 
 ### Portability review (25 November 2026)
 
@@ -379,8 +425,9 @@ installed.
 
 ### Live checks in Claude Code 2.1.330 (Claude desktop on Windows 11)
 
-These ran before the review, with the earlier layout, which kept the ignore rule in
-`.claude/skills/.gitignore`. The hooks and the sync logic are unchanged. Claude Code's skill loader
+These ran before the reviews, with the earlier layout, which kept the ignore rule in
+`.claude/skills/.gitignore`. The hook commands are the same today; the scripts behind them have
+changed as the two review sections above describe. Claude Code's skill loader
 skips a folder without `SKILL.md` silently, so the new record folder is never taken for a skill
 (read in the 2.1.330 program).
 
@@ -400,13 +447,15 @@ Write and NotebookEdit, without a filter.
 
 ### Not yet verified
 
-- A live session with the new layout and with the Write and NotebookEdit guard entry. The tests cover
-  both.
+- A live session with the new layout, with the Write, NotebookEdit and MultiEdit guard entry, and
+  with the scripts as they are after the code review. The tests cover all three.
 - The manual test as written, end to end in a live session. Its commands and expected `status`
   outputs were dry-run on Windows, with the hooks run the way Claude Code runs them. The steps on
   the Claude side rest on the earlier live checks and on the Claude Code program.
 - A run on macOS, and bash 3.2 itself. The official `bash:3.2` container image would allow the latter.
-- PowerShell 7.
+- PowerShell 7. The test machine has none; `ASB_TEST_POWERSHELL=pwsh.exe` runs the suite with one.
+- A sync inside a OneDrive folder. The link test of the PowerShell twin was checked against the
+  entries of a OneDrive folder, but nothing was copied there.
 - The terminal Claude Code CLI on the test machine (its login had expired), and cloud sessions.
 
 ---

@@ -25,9 +25,14 @@ if (@('sync', 'session', 'guard', 'status', 'clean') -notcontains $Command) {
 }
 $hook = @('sync', 'session', 'guard') -contains $Command
 
-# Hooks send a JSON event on stdin. Read it, so Claude Code never writes into a closed pipe.
+# Hooks send a JSON event on stdin. Read it, so Claude Code never writes into a closed pipe. Read it
+# as UTF-8, which it is: [Console]::In would apply the console code page and spoil every letter
+# outside ASCII in a path.
+$utf8 = New-Object System.Text.UTF8Encoding $false
 $inputText = ''
-if ($hook -and [Console]::IsInputRedirected) { $inputText = [Console]::In.ReadToEnd() }
+if ($hook -and [Console]::IsInputRedirected) {
+  $inputText = (New-Object IO.StreamReader -ArgumentList ([Console]::OpenStandardInput()), $utf8).ReadToEnd()
+}
 if ($hook -and $env:AGENT_SKILLS_BRIDGE -eq 'off') { exit 0 }
 
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
@@ -37,21 +42,49 @@ $state = Join-Path $dst '.agent-skills-bridge' # the bridge's records; like each
 $manifest = Join-Path $state 'manifest'
 $stamp = Join-Path $state 'stamp'
 $lock = Join-Path $state 'lock'
-$utf8 = New-Object System.Text.UTF8Encoding $false
 $notes = New-Object System.Collections.Generic.List[string]
 $script:changed = $false
 $script:lockStream = $null
+$reparse = [IO.FileAttributes]::ReparsePoint
+$maxDepth = 16 # folders nested deeper than this are taken for a link loop, as in the shell script
 
 function Add-Note([string]$Text) { $script:notes.Add($Text) }
+
+# Why something failed, in one line.
+function Get-Reason($ErrorRecord) {
+  $e = $ErrorRecord.Exception
+  while ($e.InnerException) { $e = $e.InnerException }
+  return $e.Message.Trim()
+}
+
+# Writes a line to stdout, or with -Stderr to stderr. Through a pipe it goes out as UTF-8, which is
+# what Claude Code reads: [Console]::Out would apply the console code page.
+function Write-Line([string]$Text, [switch]$Stderr) {
+  if ($Stderr) { $piped = [Console]::IsErrorRedirected } else { $piped = [Console]::IsOutputRedirected }
+  if (-not $piped) {
+    if ($Stderr) { [Console]::Error.WriteLine($Text) } else { [Console]::Out.WriteLine($Text) }
+    return
+  }
+  if ($Stderr) { $stream = [Console]::OpenStandardError() } else { $stream = [Console]::OpenStandardOutput() }
+  $bytes = $utf8.GetBytes($Text + "`n")
+  $stream.Write($bytes, 0, $bytes.Length)
+  $stream.Flush()
+}
 
 # True when $Name is safe as a folder name in paths, in the manifest and in JSON.
 function Test-ValidName([string]$Name) { return $Name -cmatch '^[A-Za-z0-9_][A-Za-z0-9._-]*$' }
 
 function Test-Exists([string]$Path) { return [bool](Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue) }
 
+# True when $Item is a junction or a symbolic link. The reparse-point attribute alone does not say
+# so: in a OneDrive folder every plain file and folder carries it too.
+function Test-LinkItem($Item) {
+  return [bool](($Item.Attributes -band $reparse) -and (@('Junction', 'SymbolicLink') -contains $Item.LinkType))
+}
+
 function Test-Link([string]$Path) {
   $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
-  return [bool]($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint))
+  return [bool]($item -and (Test-LinkItem $item))
 }
 
 function Get-WriteTime([string]$Path) { return (Get-Item -LiteralPath $Path -Force).LastWriteTimeUtc }
@@ -89,24 +122,126 @@ function Get-ManagedNames {
   return , $names
 }
 
-# True when $Path, or anything under it, changed at or after $Since (the start of the last sync).
-function Test-ChangedSince([string]$Path, [DateTime]$Since) {
-  if ((Get-WriteTime $Path) -ge $Since) { return $true }
-  if (-not (Test-Path -LiteralPath $Path -PathType Container) -or (Test-Link $Path)) { return $false }
-  foreach ($e in @(Get-ChildItem -LiteralPath $Path -Recurse -Force)) {
-    if ($e.LastWriteTimeUtc -ge $Since) { return $true }
+# The bridge walks folders itself, never with -Recurse: in Windows PowerShell 5.1 -Recurse follows
+# junctions and symlinks, in a link loop until the path is too long, and in PowerShell 7 it follows
+# none. The bridge follows the links in a skill, as the copy does, and no link in a copy.
+
+# Where the link $Item points to, as a full path; '' when $Item is no link or does not say.
+function Get-LinkTarget($Item) {
+  if (-not (Test-LinkItem $Item)) { return '' }
+  try {
+    $target = [string](@($Item.Target)[0])
+    if ($target.StartsWith('\??\UNC\')) { $target = '\\' + $target.Substring(8) }
+    elseif ($target.StartsWith('\??\')) { $target = $target.Substring(4) }
+    if (-not $target) { return '' }
+    if (-not [IO.Path]::IsPathRooted($target)) { $target = [IO.Path]::Combine([IO.Path]::GetDirectoryName($Item.FullName), $target) }
+    $target = [IO.Path]::GetFullPath($target)
+    if ($target.Length -gt 3) { $target = $target.TrimEnd('\') }
+    return $target
+  }
+  catch { return '' }
+}
+
+# What the folder entry $Item stands for: for a link the file or folder it points to, or nothing when
+# that is gone; for anything else $Item itself.
+function Resolve-Item($Item) {
+  if (-not ($Item.Attributes -band $reparse)) { return $Item }
+  $target = Get-LinkTarget $Item
+  if (-not $target) { return $Item }
+  return (Get-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue)
+}
+
+# The entries of the folder $Folder; none when it cannot be read.
+function Get-Entries([string]$Folder) {
+  try { return , ([IO.DirectoryInfo]$Folder).GetFileSystemInfos() }
+  catch { return , @() }
+}
+
+# True when something in the folder $Folder changed since the last sync. In a skill ($Follow): written
+# at or after $Time, when that sync began, with links followed as the copy follows them. In a copy:
+# written after $Time, when that sync ended, with no link followed. $Above lists the folders around
+# $Folder: a link back to one of them is a loop, which the copy leaves out. Past $maxDepth levels
+# the answer for a skill is "changed", as in the shell script.
+function Test-FolderChanged([string]$Folder, [DateTime]$Time, [bool]$Follow, [string[]]$Above = @()) {
+  if ($Follow -and $Above.Count -ge $maxDepth) { return $true }
+  $here = $Above + $Folder
+  foreach ($e in (Get-Entries $Folder)) {
+    $item = $e
+    if ($e.Attributes -band $reparse) {
+      if ($Follow) {
+        $item = Resolve-Item $e
+        if (-not $item) { continue } # a link to nowhere: nothing to copy
+      }
+      elseif (Test-LinkItem $e) {
+        if ($e.LastWriteTimeUtc -gt $Time) { return $true }
+        continue
+      }
+    }
+    $written = $item.LastWriteTimeUtc
+    if ($written -gt $Time -or ($Follow -and $written -eq $Time)) { return $true }
+    if (($item -is [IO.DirectoryInfo]) -and ($here -notcontains $item.FullName) -and
+      (Test-FolderChanged $item.FullName $Time $Follow $here)) { return $true }
   }
   return $false
 }
 
-# True when $Path, or anything under it, changed after $After (the end of the last sync).
-function Test-ChangedAfter([string]$Path, [DateTime]$After) {
-  if ((Get-WriteTime $Path) -gt $After) { return $true }
-  if (-not (Test-Path -LiteralPath $Path -PathType Container) -or (Test-Link $Path)) { return $false }
-  foreach ($e in @(Get-ChildItem -LiteralPath $Path -Recurse -Force)) {
-    if ($e.LastWriteTimeUtc -gt $After) { return $true }
+# True when the skill $Name, or anything in it, changed at or after $Since (the start of the last sync).
+function Test-SourceChanged([string]$Name, [DateTime]$Since) {
+  $item = Resolve-Item (Get-Item -LiteralPath (Join-Path $src $Name) -Force)
+  if (-not $item) { return $false }
+  return ($item.LastWriteTimeUtc -ge $Since) -or (Test-FolderChanged $item.FullName $Since $true)
+}
+
+# True when the copy of the skill $Name, or anything in it, changed after $After (the end of the last sync).
+function Test-CopyChanged([string]$Name, [DateTime]$After) {
+  $copy = Join-Path $dst $Name
+  return ((Get-WriteTime $copy) -gt $After) -or (Test-FolderChanged $copy $After $false)
+}
+
+# Copies the folder $From to the new folder $To. Links are followed, so the copy holds plain files and
+# folders. What cannot be copied (a link to nowhere, a link loop, a file that cannot be read) is left
+# out, as cp leaves it out for the shell script, and listed in $script:leftOut by its name in the
+# skill, which starts with $Inside.
+function Copy-Folder([string]$From, [string]$To, [string]$Inside, [string[]]$Above = @()) {
+  if ($Above.Count -ge $maxDepth) {
+    $script:tooDeep = $true
+    throw "its folders are nested more than $maxDepth deep (a link loop?)"
   }
-  return $false
+  [void][IO.Directory]::CreateDirectory($To)
+  $here = $Above + $From
+  foreach ($e in ([IO.DirectoryInfo]$From).GetFileSystemInfos()) {
+    $name = $Inside + $e.Name
+    try {
+      $item = Resolve-Item $e
+      if (-not $item) { throw 'a link to nowhere' }
+      if ($item -isnot [IO.DirectoryInfo]) { [IO.File]::Copy($item.FullName, [IO.Path]::Combine($To, $e.Name), $true) }
+      elseif ($here -contains $item.FullName) { throw 'a link loop' }
+      else { Copy-Folder $item.FullName ([IO.Path]::Combine($To, $e.Name)) ($name + '/') $here }
+    }
+    catch {
+      if ($script:tooDeep) { throw }
+      $script:leftOut += $name
+    }
+  }
+}
+
+# The files in the copy $Folder. A copy holds no links; one that someone put there is not followed.
+function Get-CopyFiles([string]$Folder) {
+  foreach ($e in ([IO.DirectoryInfo]$Folder).GetFileSystemInfos()) {
+    if ($e -is [IO.FileInfo]) { $e }
+    elseif (-not (Test-LinkItem $e)) { Get-CopyFiles $e.FullName }
+  }
+}
+
+# Makes the copy $Folder ready for [IO.Directory]::Delete: lifts read-only from its files, and unlinks
+# every link to a folder that someone put there, because that method stumbles over one. What a link
+# points to is never touched.
+function Clear-Copy([string]$Folder) {
+  foreach ($e in ([IO.DirectoryInfo]$Folder).GetFileSystemInfos()) {
+    if (Test-LinkItem $e) { if ($e -is [IO.DirectoryInfo]) { [IO.Directory]::Delete($e.FullName) } }
+    elseif ($e -is [IO.DirectoryInfo]) { Clear-Copy $e.FullName }
+    elseif ($e.IsReadOnly) { $e.IsReadOnly = $false }
+  }
 }
 
 # Works out what to copy (Wanted), refresh (Stale), delete (Gone) and leave alone (Conflicts).
@@ -125,7 +260,7 @@ function Get-Plan {
     if ($plan.Managed -contains $n) {
       $plan.Wanted += $n
       if (-not $fresh -or -not (Test-Path -LiteralPath $copy -PathType Container) -or (Test-Link $copy) -or
-        (Test-ChangedSince (Join-Path $src $n) $stampTime) -or (Test-ChangedAfter $copy $manifestTime)) { $plan.Stale += $n }
+        (Test-SourceChanged $n $stampTime) -or (Test-CopyChanged $n $manifestTime)) { $plan.Stale += $n }
     }
     elseif (Test-Exists $copy) { $plan.Conflicts += $n }
     else { $plan.Wanted += $n; $plan.Stale += $n }
@@ -140,11 +275,11 @@ function Remove-Copy([string]$Name) {
   $item = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
   if (-not $item) { return $true }
   try {
-    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-      if ($item.PSIsContainer) { [IO.Directory]::Delete($p) } else { [IO.File]::Delete($p) }
+    if (Test-LinkItem $item) {
+      if ($item -is [IO.DirectoryInfo]) { [IO.Directory]::Delete($p) } else { [IO.File]::Delete($p) }
     }
-    elseif ($item.PSIsContainer) {
-      foreach ($f in @(Get-ChildItem -LiteralPath $p -Recurse -Force -File)) { $f.IsReadOnly = $false }
+    elseif ($item -is [IO.DirectoryInfo]) {
+      Clear-Copy $p
       [IO.Directory]::Delete($p, $true)
     }
     else { $item.IsReadOnly = $false; [IO.File]::Delete($p) }
@@ -158,23 +293,41 @@ function Remove-Copy([string]$Name) {
 function Set-CopyIgnore([string]$Name) {
   $file = Join-Path (Join-Path $dst $Name) '.gitignore'
   $old = Get-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
-  if ($old) { $old.IsReadOnly = $false } # a read-only .gitignore that came with the source
+  if ($old) { $old.Attributes = [IO.FileAttributes]::Normal } # a read-only or hidden .gitignore that came with the source
   $text = "# Copy of .agents/skills/$Name for Claude Code, made by .claude/hooks/agent-skills-bridge.sh.`n" +
   "# Git ignores the whole copy. Edit the original in .agents/skills.`n*`n"
   [IO.File]::WriteAllText($file, $text, $utf8)
 }
 
-# Copies .agents/skills/$Name to .claude/skills/$Name, gives the copy its .gitignore and makes it read-only.
+# Copies .agents/skills/$Name to .claude/skills/$Name, gives the copy its .gitignore and makes it
+# read-only. False when it leaves a copy behind that is not whole.
 function Copy-Skill([string]$Name) {
-  $from = Join-Path $src $Name
   $to = Join-Path $dst $Name
-  if (Test-Exists $to) { Add-Note "Could not replace .claude/skills/$Name; is a file in it open?"; return }
-  try {
-    Copy-Item -LiteralPath $from -Destination $to -Recurse -Force
-    Set-CopyIgnore $Name
-    foreach ($f in @(Get-ChildItem -LiteralPath $to -Recurse -Force -File)) { $f.IsReadOnly = $true }
+  if (Test-Exists $to) {
+    Add-Note "Could not replace .claude/skills/$Name; is a file in it open?"
+    return $false
   }
-  catch { Add-Note "Could not copy .agents/skills/$Name." }
+  $script:leftOut = @()
+  $script:tooDeep = $false
+  try {
+    $from = Resolve-Item (Get-Item -LiteralPath (Join-Path $src $Name) -Force)
+    if (-not $from) { throw 'it is a link to nowhere' }
+    Copy-Folder $from.FullName $to ''
+    if (-not (Test-Path -LiteralPath (Join-Path $to 'SKILL.md') -PathType Leaf)) { throw 'its SKILL.md cannot be read' }
+    Set-CopyIgnore $Name
+    foreach ($f in @(Get-CopyFiles $to)) { $f.IsReadOnly = $true }
+  }
+  catch {
+    Add-Note "Could not copy .agents/skills/${Name}: $(Get-Reason $_)"
+    # No half copy: Claude Code would list it, and the next sync would take it for current.
+    return (Remove-Copy $Name)
+  }
+  if ($script:leftOut.Count) {
+    $names = @($script:leftOut | Select-Object -First 3) -join ', '
+    if ($script:leftOut.Count -gt 3) { $names += ' and more' }
+    Add-Note "Not everything in .agents/skills/$Name could be copied ($names): look for a broken link, a link loop or a file that cannot be read."
+  }
+  return $true
 }
 
 # Takes the lock (a file opened for exclusive use); a lock left by a killed run goes stale after two minutes.
@@ -242,14 +395,20 @@ function Invoke-Sync {
     if (($plan.Stale.Count + $plan.Gone.Count) -eq 0) { return }
     [IO.File]::WriteAllText($stamp, '', $utf8)
     $script:changed = $true
+    $broken = $false
+    $kept = @()
     foreach ($n in $plan.Gone) {
-      if (-not (Remove-Copy $n)) { Add-Note "Could not delete the old copy .claude/skills/$n." }
+      if (-not (Remove-Copy $n)) {
+        Add-Note "Could not delete the old copy .claude/skills/$n; is a file in it open?"
+        $kept += $n # still the bridge's: the next sync tries again
+        $broken = $true
+      }
     }
     foreach ($n in $plan.Stale) {
       [void](Remove-Copy $n)
-      Copy-Skill $n
+      if (-not (Copy-Skill $n)) { $broken = $true }
     }
-    $kept = @($plan.Wanted | Where-Object { Test-Path -LiteralPath (Join-Path $dst $_) -PathType Container })
+    $kept += @($plan.Wanted | Where-Object { Test-Path -LiteralPath (Join-Path $dst $_) -PathType Container })
     if ($kept.Count -eq 0) {
       Remove-Item -LiteralPath $manifest, $stamp -Force -ErrorAction SilentlyContinue
       return
@@ -258,6 +417,9 @@ function Invoke-Sync {
     $tmp = "$manifest.tmp"
     [IO.File]::WriteAllText($tmp, $text, $utf8)
     Move-Item -LiteralPath $tmp -Destination $manifest -Force
+    # What could not be deleted or made whole must not pass for current. Without the stamp this sync
+    # counts as unfinished, and the next one makes every copy again.
+    if ($broken) { Remove-Item -LiteralPath $stamp -Force -ErrorAction SilentlyContinue }
   }
   finally { Exit-Lock }
 }
@@ -272,8 +434,8 @@ function Get-NativeRoot {
 # Tells Claude Code (JSON on stdout) or the person at a console what happened.
 function Write-Result {
   if (-not [Console]::IsOutputRedirected) {
-    if ($notes.Count) { [Console]::Error.WriteLine('agent-skills bridge: ' + ($notes -join ' ')) }
-    if ($script:changed) { [Console]::Out.WriteLine('agent-skills bridge: updated the copies in .claude/skills.') }
+    if ($notes.Count) { Write-Line ('agent-skills bridge: ' + ($notes -join ' ')) -Stderr }
+    if ($script:changed) { Write-Line 'agent-skills bridge: updated the copies in .claude/skills.' }
     return
   }
   $out = [ordered]@{}
@@ -283,17 +445,31 @@ function Write-Result {
     $out.hookSpecificOutput = $answer
   }
   if ($notes.Count) { $out.systemMessage = 'agent-skills bridge: ' + ($notes -join ' ') }
-  if ($out.Count) { [Console]::Out.WriteLine(($out | ConvertTo-Json -Compress -Depth 5)) }
+  if ($out.Count) { Write-Line ($out | ConvertTo-Json -Compress -Depth 5) }
+}
+
+# The string that the JSON event on stdin gives for a key (a regex), or '' when there is none.
+# A regex, not ConvertFrom-Json: Windows PowerShell 5.1 refuses an event over 2 MB, such as a big Write.
+function Get-JsonString([string]$Key) {
+  $m = [regex]::Match($inputText, '"' + $Key + '"\s*:\s*"((?:[^"\\]|\\.)*)"')
+  if (-not $m.Success) { return '' }
+  try { return [string]('{"p":"' + $m.Groups[1].Value + '"}' | ConvertFrom-Json).p } catch { return '' }
 }
 
 # PreToolUse: exit 2 (refuse, with the reason on stderr) when Write, Edit, MultiEdit or
 # NotebookEdit targets a file inside a copy; exit 0 for anything else.
 function Invoke-Guard {
   if ($inputText -notmatch 'skills') { return }
-  $m = [regex]::Match($inputText, '"(?:file_path|notebook_path)"\s*:\s*"((?:[^"\\]|\\.)*)"')
-  if (-not $m.Success) { return }
+  $path = Get-JsonString '(?:file_path|notebook_path)'
+  if (-not $path) { return }
   try {
-    $path = ('{"p":"' + $m.Groups[1].Value + '"}' | ConvertFrom-Json).p
+    $path = $path -replace '^/([A-Za-z])(?=/|$)', '$1:' # /c/... as Git Bash spells C:/...
+    if (-not [IO.Path]::IsPathRooted($path)) {
+      # A relative path counts from the folder the event names, or else from the repository.
+      $from = Get-JsonString 'cwd'
+      if (-not $from) { $from = Get-NativeRoot }
+      $path = [IO.Path]::Combine($from, $path)
+    }
     $full = [IO.Path]::GetFullPath($path)
     $base = [IO.Path]::GetFullPath((Get-NativeRoot) + '/.claude/skills') + '\'
   }
@@ -305,7 +481,7 @@ function Invoke-Guard {
   if ($match.Count -eq 0) { return }
   $sub = ''
   if ($rest.Contains('\')) { $sub = ($rest -split '\\', 2)[1] -replace '\\', '/' }
-  [Console]::Error.WriteLine("Blocked by the agent-skills bridge: .claude/skills/$($match[0])/ is a generated copy of .agents/skills/$($match[0])/ and the next sync overwrites it. Make this change in .agents/skills/$($match[0])/$sub instead; Claude Code picks it up automatically.")
+  Write-Line "Blocked by the agent-skills bridge: .claude/skills/$($match[0])/ is a generated copy of .agents/skills/$($match[0])/ and the next sync overwrites it. Make this change in .agents/skills/$($match[0])/$sub instead; Claude Code picks it up automatically." -Stderr
   exit 2
 }
 
@@ -356,7 +532,8 @@ function Show-Status {
   }
   foreach ($n in $plan.Source) {
     if ($n -cnotmatch '^[a-z0-9]+(-[a-z0-9]+)*$') { "  note            ${n}: the Agent Skills spec wants lowercase letters, digits and single hyphens" }
-    $lines = [IO.File]::ReadAllLines((Join-Path (Join-Path $src $n) 'SKILL.md'))
+    $lines = @()
+    try { $lines = [IO.File]::ReadAllLines((Join-Path (Join-Path $src $n) 'SKILL.md')) } catch { }
     if ($lines.Count -gt 0 -and $lines[0].TrimEnd() -eq '---') {
       for ($i = 1; $i -lt $lines.Count -and $lines[$i].TrimEnd() -ne '---'; $i++) {
         if ($lines[$i] -match '^name:\s*(.*)$') {
@@ -382,11 +559,14 @@ function Invoke-Clean {
   if (-not (Enter-Lock)) { [Console]::Error.WriteLine('agent-skills bridge: another sync is running; try again.'); exit 1 }
   try {
     $managed = Get-ManagedNames
-    foreach ($n in $managed) {
-      if (-not (Remove-Copy $n)) { [Console]::Error.WriteLine("agent-skills bridge: could not delete .claude/skills/$n") }
-    }
+    $stuck = @($managed | Where-Object { -not (Remove-Copy $_) })
   }
   finally { Exit-Lock }
+  if ($stuck.Count) {
+    # The records stay: without them the bridge would take what is left for someone else's skills.
+    [Console]::Error.WriteLine("agent-skills bridge: could not delete: $($stuck -join ' '). Is a file in there open? Close it and run clean again.")
+    exit 1
+  }
   Remove-Item -LiteralPath $state -Recurse -Force -ErrorAction SilentlyContinue # the records
   "agent-skills bridge: deleted the copies: $($managed -join ' ')."
 }
@@ -406,7 +586,7 @@ try {
 }
 catch {
   if ($Command -eq 'guard') { exit 0 } # never block an edit because the bridge broke
-  Add-Note "failed: $($_.Exception.Message)"
-  if ($hook) { Write-Result } else { [Console]::Error.WriteLine("agent-skills bridge: failed: $($_.Exception.Message)"); exit 1 }
+  Add-Note "failed: $(Get-Reason $_)"
+  if ($hook) { Write-Result } else { [Console]::Error.WriteLine("agent-skills bridge: failed: $(Get-Reason $_)"); exit 1 }
 }
 exit 0

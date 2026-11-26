@@ -17,11 +17,15 @@
 #
 # Hooks dot-source this file with ASB_CMD set, so no second shell starts. When nothing changed it
 # starts no process at all: on Windows each process can cost the better part of a second. It runs in
-# POSIX sh: dash (Ubuntu), bash 3.2 (macOS), Git Bash (Windows), BusyBox ash (Alpine).
+# POSIX sh: dash (Ubuntu), bash 3.2 (macOS), Git Bash (Windows), BusyBox ash (Alpine), and in zsh.
 # agent-skills-bridge.ps1 does the same job where Claude Code runs hooks in PowerShell (Windows
 # without Git Bash). Keep both in step.
 
+# zsh, when a hook shell is one: split words and leave unmatched globs alone, as sh does, and
+# expand no aliases (zsh reads ~/.zshenv, and with it any alias, even for a hook).
+[ -z "${ZSH_VERSION:-}" ] || { emulate sh && unsetopt aliases; }
 set -u
+CDPATH= # or cd could go somewhere else, and print where
 
 if [ -n "${ASB_CMD:-}" ]; then
   cmd=$ASB_CMD
@@ -54,8 +58,6 @@ state=$dst/.agent-skills-bridge # the bridge's records; like each copy, the fold
 manifest=$state/manifest
 stamp=$state/stamp
 lock=$state/lock
-cr= # a carriage return, to read a manifest someone saved with CRLF (bash only: no subshell)
-if [ -n "${BASH_VERSION:-}" ]; then printf -v cr '\r'; fi
 notes=
 changed=0
 
@@ -71,6 +73,18 @@ valid_name() {
 has() {
   case " $1 " in *" $2 "*) return 0 ;; esac
   return 1
+}
+
+# Sets l to $1 in lower case, in-process where the shell allows it (bash 4 and later).
+lower() {
+  if [ "${BASH_VERSINFO:-0}" -ge 4 ]; then eval 'l=${1,,}'; else l=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]'); fi
+}
+
+# Turns the escaped backslashes (\\) of the JSON string in $p into slashes, in-process where the
+# shell allows it. Each must become one slash: two of them start a network path (\\server\share).
+p_json() {
+  case $p in *\\\\*) ;; *) return 0 ;; esac
+  if [ -n "${BASH_VERSION:-}" ]; then eval 'p=${p//\\\\//}'; else p=$(printf '%s' "$p" | sed 's|\\\\|/|g'); fi
 }
 
 # Turns the backslashes in $p into slashes, in-process where the shell allows it.
@@ -94,21 +108,71 @@ p_drive() {
   esac
 }
 
-# Sets nroot to the repository path the way Claude Code spells it (C:/... on Windows).
-native_root() {
-  p=${CLAUDE_PROJECT_DIR:-$PWD}
+# Resolves the "." and ".." folders in the absolute path $p and drops doubled and trailing slashes,
+# in-process. The two slashes that start a network path (//server/share) stay.
+p_dots() {
+  case $p/ in *//* | */./* | */../*) ;; *) return 0 ;; esac
+  case $p in //[!/]*) unc=/ ;; *) unc= ;; esac
+  todo=$p/
+  p=${todo%%/*}
+  todo=${todo#*/}
+  while [ -n "$todo" ]; do
+    seg=${todo%%/*}
+    todo=${todo#*/}
+    case $seg in
+      '' | .) ;;
+      ..) case $p in */*) p=${p%/*} ;; esac ;;
+      *) p=$p/$seg ;;
+    esac
+  done
+  [ -n "$p" ] || p=/
+  p=$unc$p
+}
+
+# Spells the absolute path in $p the way Claude Code does: slashes, C:/... on Windows (also for the
+# /c/... of Git Bash), no "." or ".." folders.
+p_native() {
   p_slashes
-  p=${p%/}
   case $p in
-    /[a-zA-Z]/*) if [ -n "${MSYSTEM:-}" ]; then
+    /[a-zA-Z] | /[a-zA-Z]/*) if [ -n "${MSYSTEM:-}" ]; then
       d=${p#/}
       d=${d%%/*}
       p=$d:${p#/"$d"}
     fi ;;
   esac
   p_drive
-  case $p in *\"*) p=$(printf '%s' "$p" | sed 's/"/\\"/g') ;; esac
-  nroot=$p
+  p_dots
+}
+
+# Sets nroot to the repository path the way Claude Code spells it (C:/... on Windows), without a
+# slash at its end: empty when the repository is the root folder.
+native_root() {
+  p=${CLAUDE_PROJECT_DIR:-$PWD}
+  case $p in /* | [a-zA-Z]:* | \\*) ;; *) p=$PWD ;; esac # a relative one: the shell is there already
+  p_native
+  nroot=${p%/}
+}
+
+# Sets p to the string that the JSON event in $input gives for the key $1, escapes and all; fails
+# when there is none. Allows blanks around the colon. A key quoted inside another string has a
+# backslash before its closing quote, so it never matches.
+json_string() {
+  p=$input
+  while :; do
+    case $p in *"\"$1\""*) p=${p#*"\"$1\""} ;; *) return 1 ;; esac
+    q=$p
+    json_blanks
+    case $q in :*) q=${q#:} ;; *) continue ;; esac
+    json_blanks
+    case $q in \"*) ;; *) continue ;; esac
+    p=${q#\"}
+    p=${p%%\"*}
+    return 0
+  done
+}
+
+json_blanks() {
+  while :; do case $q in [[:space:]]*) q=${q#?} ;; *) return 0 ;; esac; done
 }
 
 # Sets src_names to the folders in .agents/skills that hold a SKILL.md.
@@ -130,14 +194,15 @@ read_manifest() {
   managed=
   [ -f "$manifest" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
-    line=${line%"$cr"}
+    line=${line%[[:cntrl:]]} # the carriage return of a manifest that someone saved with CRLF
     case $line in '' | '#'*) continue ;; esac
     if valid_name "$line"; then managed="$managed $line"; fi
   done < "$manifest"
 }
 
 # True when $1, or anything under it, changed at or after the stamp (taken when the last sync began).
-# Follows links, as the copy does; past 16 levels (a link loop?) it answers "changed".
+# Follows links, as the copy does; past 16 levels (a link loop?) it answers "changed". A link to
+# nowhere has nothing to copy and counts for nothing: [ -nt ] would answer differently per shell.
 depth=0
 src_changed() {
   [ "$stamp" -nt "$1" ] || return 0
@@ -148,7 +213,7 @@ src_changed() {
     return 0
   fi
   for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
-    if { [ -e "$e" ] || [ -L "$e" ]; } && src_changed "$e"; then
+    if [ -e "$e" ] && src_changed "$e"; then
       depth=$((depth - 1))
       return 0
     fi
@@ -203,8 +268,17 @@ remove_copies() {
   done
   # shellcheck disable=SC2086 # relative paths built from validated names
   [ -z "$links" ] || rm -f $links
+  [ -n "$dirs" ] || return 0
   # shellcheck disable=SC2086
-  [ -z "$dirs" ] || rm -rf $dirs
+  rm -rf $dirs 2> /dev/null
+  again=
+  for n in $dirs; do [ ! -e "$n" ] || again="$again $n"; done
+  [ -n "$again" ] || return 0
+  # A folder that is read-only in the source is read-only in the copy, and holds on to its files.
+  # shellcheck disable=SC2086
+  chmod -R u+w $again 2> /dev/null
+  # shellcheck disable=SC2086
+  rm -rf $again 2> /dev/null
 }
 
 # The .gitignore of the copy of skill $1: it makes git ignore the whole copy, whatever the rules
@@ -217,25 +291,29 @@ copy_ignore_text() {
 ignore_copy() {
   f=$dst/$1/.gitignore
   { copy_ignore_text "$1" > "$f"; } 2> /dev/null && return 0
-  rm -f "$f" # a read-only .gitignore that came with the source
+  chmod u+w "$dst/$1" 2> /dev/null # a skill folder that is read-only in the source
+  rm -f "$f"                       # a read-only .gitignore that came with the source
   { copy_ignore_text "$1" > "$f"; } 2> /dev/null || note "Could not write $f, so git may list that copy."
 }
 
 # Copies .agents/skills/<name> to .claude/skills/<name> for every name in the arguments whose old
 # copy is gone, gives each copy its .gitignore, then makes the copies read-only. Three processes,
-# however many skills.
+# however many skills. Sets broken=1 when it leaves a copy behind that is not whole.
 copy_skills() {
   from=
   for n in ${1+"$@"}; do
     if [ -e "$dst/$n" ] || [ -L "$dst/$n" ]; then
       note "Could not replace .claude/skills/$n; is a file in it open?"
+      broken=1
     else
       from="$from $src/$n"
     fi
   done
   # shellcheck disable=SC2086
-  [ -z "$from" ] || cp -R -L $from "$dst/" 2> /dev/null
+  [ -z "$from" ] || cp -R -L $from "$dst/" 2> /dev/null ||
+    note "Not everything in .agents/skills could be copied: look for a broken link, a link loop or a file that cannot be read."
   made=
+  halves=
   for n in ${1+"$@"}; do
     case " $from " in *" $src/$n "*) ;; *) continue ;; esac
     if [ -f "$dst/$n/SKILL.md" ]; then
@@ -243,10 +321,16 @@ copy_skills() {
       made="$made $dst/$n"
     else
       note "Could not copy .agents/skills/$n."
+      halves="$halves $n"
     fi
   done
   # shellcheck disable=SC2086
   [ -z "$made" ] || find $made -type f -exec chmod a-w {} + 2> /dev/null
+  [ -n "$halves" ] || return 0
+  # No half copy: Claude Code would list it, and the next sync would take it for current.
+  # shellcheck disable=SC2086
+  remove_copies $halves
+  for n in $halves; do [ ! -e "$dst/$n" ] || broken=1; done
 }
 
 # Takes the lock folder; a lock left by a killed run goes stale after two minutes.
@@ -313,14 +397,19 @@ do_sync() {
   [ -n "$stale$gone" ] || return 0
   : > "$stamp"
   changed=1
+  broken=0
   # shellcheck disable=SC2086 # validated names
   remove_copies $gone $stale
+  kept=
   for n in $gone; do
-    if [ -e "$dst/$n" ] || [ -L "$dst/$n" ]; then note "Could not delete the old copy .claude/skills/$n."; fi
+    if [ -e "$dst/$n" ] || [ -L "$dst/$n" ]; then
+      note "Could not delete the old copy .claude/skills/$n; is a file in it open?"
+      kept="$kept $n" # still the bridge's: the next sync tries again
+      broken=1
+    fi
   done
   # shellcheck disable=SC2086
   copy_skills $stale
-  kept=
   for n in $wanted; do [ -d "$dst/$n" ] && kept="$kept $n"; done
   if [ -z "$kept" ]; then
     rm -f "$manifest" "$stamp"
@@ -330,6 +419,9 @@ do_sync() {
     echo '# Copies made by .claude/hooks/agent-skills-bridge.sh from .agents/skills. Do not edit.'
     for n in $kept; do echo "$n"; done
   } > "$lock/manifest" && mv -f "$lock/manifest" "$manifest"
+  # What could not be deleted or made whole must not pass for current. Without the stamp this sync
+  # counts as unfinished, and the next one makes every copy again.
+  [ "$broken" = 0 ] || rm -f "$stamp"
 }
 
 # Tells Claude Code (JSON on stdout) or the person at a terminal what happened.
@@ -342,6 +434,7 @@ emit() {
   out=
   if [ "$cmd" = session ] && [ -d "$src" ]; then
     native_root
+    case $nroot in *\"*) nroot=$(printf '%s' "$nroot" | sed 's/"/\\"/g') ;; esac
     out='"hookSpecificOutput":{"hookEventName":"SessionStart","watchPaths":["'$nroot/$src'"]'
     [ "$changed" = 0 ] || out="$out"',"reloadSkills":true'
     out="$out}"
@@ -354,38 +447,56 @@ emit() {
 # NotebookEdit targets a file inside a copy; exit 0 for anything else.
 do_guard() {
   case $input in *[Ss][Kk][Ii][Ll][Ll][Ss]*) ;; *) return 0 ;; esac
-  case $input in
-    *'"file_path":"'*) p=${input#*\"file_path\":\"} ;;
-    *'"notebook_path":"'*) p=${input#*\"notebook_path\":\"} ;;
-    *) return 0 ;;
-  esac
-  p=${p%%\"*}
+  json_string file_path || json_string notebook_path || return 0
+  p_json
   p_slashes
-  while :; do case $p in *//*) p=${p%%//*}/${p#*//} ;; *) break ;; esac; done
-  p_drive
   fp=$p
   native_root
-  read_manifest
-  match=
   case $fp in
-    "$nroot/$dst"/*)
-      rest=${fp#"$nroot/$dst"/}
-      n=${rest%%/*}
-      has "$managed" "$n" && match=$n
-      ;;
+    /* | [A-Za-z]:/*) p=$fp ;;
     *)
-      # Windows and macOS: the same path in another letter case.
-      lfp=$(printf '%s' "$fp" | tr '[:upper:]' '[:lower:]')
-      lbase=$(printf '%s' "$nroot/$dst" | tr '[:upper:]' '[:lower:]')
-      case $lfp in "$lbase"/*) ;; *) return 0 ;; esac
-      rest=${lfp#"$lbase"/}
-      n=${rest%%/*}
-      lmanaged=$(printf '%s' "$managed" | tr '[:upper:]' '[:lower:]')
-      for m in $managed; do
-        if has "$lmanaged" "$n" && [ "$(printf '%s' "$m" | tr '[:upper:]' '[:lower:]')" = "$n" ]; then match=$m; fi
-      done
+      # A relative path counts from the folder the event names, or else from the repository.
+      if json_string cwd && [ -n "$p" ]; then
+        p_json
+        p=$p/$fp
+      else
+        p=$nroot/$fp
+      fi
       ;;
   esac
+  p_native
+  fp=$p
+  case $fp in */.[Cc][Ll][Aa][Uu][Dd][Ee]/[Ss][Kk][Ii][Ll][Ll][Ss]/*) ;; *) return 0 ;; esac
+  base=$nroot/$dst
+  case $fp in
+    "$base"/*) rest=${fp#"$base"/} ;;
+    *)
+      # The same folder in another letter case. Windows and macOS take that for the same folder.
+      # The bridge cannot tell what the file system here does, so it refuses everywhere.
+      lower "$fp"
+      lfp=$l
+      lower "$base"
+      case $lfp in "$l"/*) ;; *) return 0 ;; esac
+      rest=${lfp#"$l"/}
+      ;;
+  esac
+  n=${rest%%/*}
+  valid_name "$n" || return 0
+  read_manifest
+  match=
+  if has "$managed" "$n"; then
+    match=$n
+  else
+    lower "$n"
+    ln=$l
+    lower "$managed"
+    if has "$l" "$ln"; then
+      for m in $managed; do
+        lower "$m"
+        [ "$l" != "$ln" ] || match=$m
+      done
+    fi
+  fi
   [ -n "$match" ] || return 0
   sub=
   case $rest in */*) sub=${rest#*/} ;; esac
@@ -456,7 +567,7 @@ do_status() {
   fi
   for n in $src_names; do
     case $n in *[!a-z0-9-]* | -* | *- | *--*) echo "  note            $n: the Agent Skills spec wants lowercase letters, digits and single hyphens" ;; esac
-    fm=$(sed -n -e '1{/^---/!q;}' -e '2,/^---/s/^name:[[:space:]]*//p' "$src/$n/SKILL.md" | tr -d "\"'$cr" | head -n 1)
+    fm=$(sed -n -e '1{/^---/!q;}' -e '2,/^---/s/^name:[[:space:]]*//p' "$src/$n/SKILL.md" 2> /dev/null | tr -d "\"'\r" | head -n 1)
     [ -z "$fm" ] || [ "$fm" = "$n" ] || echo "  note            $n: SKILL.md says name: $fm; VS Code, Cursor and the spec want it to match the folder"
   done
   if command -v git > /dev/null 2>&1 && git rev-parse --is-inside-work-tree > /dev/null 2>&1; then git_status; fi
@@ -481,9 +592,15 @@ do_clean() {
   read_manifest
   # shellcheck disable=SC2086 # validated names
   remove_copies $managed
+  stuck=
   for n in $managed; do
-    if [ -e "$dst/$n" ] || [ -L "$dst/$n" ]; then echo "agent-skills bridge: could not delete .claude/skills/$n" >&2; fi
+    if [ -e "$dst/$n" ] || [ -L "$dst/$n" ]; then stuck="$stuck $n"; fi
   done
+  if [ -n "$stuck" ]; then
+    # The records stay: without them the bridge would take what is left for someone else's skills.
+    echo "agent-skills bridge: could not delete:$stuck. Is a file in there open? Close it and run clean again." >&2
+    exit 1
+  fi
   rm -rf "$state" # the records, the lock included
   echo "agent-skills bridge: deleted the copies:$managed."
 }

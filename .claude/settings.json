@@ -24,7 +24,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Edit|MultiEdit",
+        "matcher": "Edit",
         "hooks": [
           {
             "type": "command",
@@ -35,7 +35,7 @@
         ]
       },
       {
-        "matcher": "Write|NotebookEdit",
+        "matcher": "MultiEdit|Write|NotebookEdit",
         "hooks": [
           {
             "type": "command",

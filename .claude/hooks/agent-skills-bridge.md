@@ -22,9 +22,15 @@ version control and never committed. Nobody has to install or run anything.
    source file to edit instead. Copies are read-only too, so editors warn people.
    - **Edit:** the hook's `if` filter limits it to paths in `.claude/skills`, so other edits start no
      process.
-   - **Write and NotebookEdit:** Claude Code's `if` filter can't match these tools to an `Edit` rule,
-     so their entry has no filter. The guard starts on every call and exits at once unless the path is
-     in `.claude/skills`.
+   - **Write, NotebookEdit and MultiEdit:** a hook's `if` holds exactly one rule, and an `Edit` rule
+     filters only the Edit tool. So their entry has no filter: the guard starts on every call and
+     exits at once unless the path is in `.claude/skills`. MultiEdit is in the list for Claude Code
+     versions that still have that tool.
+   - **The usual spellings of a path.** The guard resolves `.` and `..`, counts a relative path from
+     the folder the hook event names, and takes `C:\...`, `C:/...`, Git Bash's `/c/...` and another
+     letter case for the same file. It compares spellings, not files: a `\\?\` path, a short 8.3
+     name or a link that leads into a copy gets past it. The next sync catches those, because it
+     replaces a copy that was edited.
 4. **Out of version control.** Each copy contains its own `.gitignore` with the single rule `*`.
    So does the bridge's record folder, `.claude/skills/.agent-skills-bridge/`.
    - **git:** it ignores the copies whatever your other `.gitignore` files say. The bridge never
@@ -38,6 +44,11 @@ The bridge never writes through a link and never touches a skill in `.claude/ski
 create. It reports such a name as a conflict. When nothing changed, a hook run starts no process
 beyond the shell Claude Code opens for it. That matters on Windows, where security software can make
 each process cost most of a second.
+
+Links inside a skill (symlinks, and junctions on Windows) are followed, so a copy holds plain files
+and folders. What cannot be copied is left out and reported: a link to nowhere, a link loop, a file
+that cannot be read. A sync that cannot finish, for example because a program holds a file of a copy
+open, is reported too, and the next hook tries again. Such a copy never passes for current.
 
 ## Files
 
@@ -112,8 +123,8 @@ add them next to your own entries under the same event names. The result has thi
     ],
     "PreToolUse": [
       { "matcher": "Bash", "hooks": [{ "type": "command", "command": "your-bash-check.sh" }] },
-      { "matcher": "Edit|MultiEdit", "hooks": [{ "type": "command", "if": "Edit(**/.claude/skills/**)", "command": "set \\' ; ASB_CMD=guard ...", "timeout": 30 }] },
-      { "matcher": "Write|NotebookEdit", "hooks": [{ "type": "command", "command": "set \\' ; ASB_CMD=guard ...", "timeout": 30 }] }
+      { "matcher": "Edit", "hooks": [{ "type": "command", "if": "Edit(**/.claude/skills/**)", "command": "set \\' ; ASB_CMD=guard ...", "timeout": 30 }] },
+      { "matcher": "MultiEdit|Write|NotebookEdit", "hooks": [{ "type": "command", "command": "set \\' ; ASB_CMD=guard ...", "timeout": 30 }] }
     ]
   }
 }
@@ -516,6 +527,10 @@ Cursor staff on its forum. The record folder has no `SKILL.md`, so no tool loads
 | A skill is missing in Claude Code | Run `status`. For a brand-new checkout, accept the folder trust prompt: hooks run only in trusted folders. |
 | "Blocked by the agent-skills bridge" | Claude tried to edit a copy. It edits the named source file instead. |
 | "`.claude/skills/<name>` exists and was not made by the bridge" | A skill of the same name lives in `.claude/skills`. Move it to `.agents/skills`, or rename one of them. |
+| "Could not replace `.claude/skills/<name>`; is a file in it open?", or "Could not delete the old copy" | A program holds a file of the copy open; on Windows that blocks deleting it. Close the file. The next hook tries again, and so does `sync`. Until then `status` reports the copies as out of date. |
+| "Not everything in `.agents/skills` could be copied" | A skill holds a link to nowhere, a link loop or a file that you may not read. The rest of the skill is copied. Repair or remove that entry. |
+| "Could not copy `.agents/skills/<name>`" | Its `SKILL.md` could not be read. The PowerShell twin also says so when the skill's folders are nested more than 16 deep, which it takes for a link loop. No copy is left behind, and every hook tries again. |
+| `clean`: "could not delete: `<name>`" | As above: a file in that copy is open. The records stay, so close the file and run `clean` again. |
 | `status`: "git not ignored: `<name>`" | The copy lost its `.gitignore`, or someone committed it. Run `sync`. If git tracks the copy, run `git rm -r --cached .claude/skills/<name>`. |
 | `status`: "svn not ignored", or `svn status` lists copies | Set `svn:ignore` to `*` on `.claude/skills` (see the svn section). |
 | Linux or macOS: the hook fails with `$'\r'`, `: not found` or "Illegal option -" | The script has CRLF line endings. Commit `.claude/hooks/.gitattributes` (git) or set `svn:eol-style LF` (svn), then check the file out again. |
@@ -545,7 +560,8 @@ set \' ; ASB_CMD=session . "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridg
 ```
 
 - **POSIX shell.** `\'` is a quote character. The shell runs `set`, sources the shell script, and
-  exits. Everything after `#` is a comment.
+  exits. Everything after `#` is a comment. Should the hook shell be zsh, the script first puts it
+  into `sh` emulation and turns alias expansion off, so it behaves there as in `sh`.
 - **PowerShell.** `\'...#'` is one quoted argument to `set` (`Set-Variable`), so the POSIX half is
   inert. PowerShell then runs the `.ps1` file and passes its exit code on.
 - **Not for cmd.** Typed into cmd, the command fails with "The filename, directory name, or volume
@@ -562,29 +578,48 @@ These are the automated tests. To check a real Claude Code session by hand, foll
 ```sh
 sh .claude/hooks/agent-skills-bridge.test.sh        # the sh bridge, in any POSIX shell
 sh .claude/hooks/agent-skills-bridge.test.sh ps1    # the PowerShell bridge (Git Bash on Windows)
+ASB_TEST_SHELL=zsh sh .claude/hooks/agent-skills-bridge.test.sh   # the sh bridge, hooks run in zsh
 ```
+
+`ASB_TEST_SHELL` names the shell that runs the hook commands (default: `sh`).
+`ASB_TEST_POWERSHELL` names the PowerShell for `ps1` (default: `powershell.exe`), for example
+`pwsh.exe`.
 
 The tests run the exact commands from `.claude/settings.json`, the way Claude Code runs them. They
 cover:
 
-- the first sync, a sync with nothing to do, source edits, removals, conflicts and repairs;
-- the guard;
-- links and junctions, a stale lock and the off switch;
-- `status` and `clean`, and paths with spaces;
+- the first sync, source edits, removals, conflicts and repairs;
+- a sync with nothing to do, which must start no program;
+- the guard: the four editing tools, relative paths, `.` and `..`, other letter cases, the Git Bash
+  and network spellings, and events with blanks in their JSON;
+- links, junctions and link loops in a skill, links to nowhere, and a junction that someone put into
+  a copy;
+- a copy that cannot be replaced or deleted, and files that cannot be copied;
+- a stale lock and the off switch;
+- `status` and `clean`;
+- paths with spaces, with a letter outside ASCII, and network paths;
+- files saved with CRLF, read-only folders, `CDPATH`, and zsh with an alias from `.zshenv`;
 - in git: an existing `.claude/skills` with its own skill and `.gitignore`, and a clone with
   `core.autocrlf=true`;
 - in svn: `svn:ignore` and a skill of your own.
 
-Results on 25 November 2026:
+A case that needs something the system lacks is skipped, and the test says so: symlinks and file
+modes on Windows, junctions and network paths elsewhere, git, svn or node where they are missing.
+
+Results on 25 and 26 November 2026:
 
 | System | Shell | Result |
 |---|---|---|
-| Windows 11 | Git Bash (bash 5.2 as `sh`) | 77/77; Windows has no symlinks for the link cases |
-| Windows 11 | Windows PowerShell 5.1 | 77/77 |
-| Ubuntu 24.04 (WSL) | dash 0.5.12 | 78/78 |
-| Ubuntu 24.04 (WSL) | bash 5.2 as `sh` | 78/78 |
-| Ubuntu 24.04 (WSL) | zsh 5.9 as `sh` | 78/78 |
-| Alpine 3.24 (container) | BusyBox 1.37 `ash` and tools | 59/59; no git or svn there |
+| Windows 11 | Git Bash (bash 5.3 as `sh`) | 149/149; Windows has no symlinks for the link cases |
+| Windows 11 | Windows PowerShell 5.1 | 143/143 |
+| Ubuntu 24.04 (WSL) | dash 0.5.12 | 138/138 |
+| Ubuntu 24.04 (WSL) | bash 5.2 as `sh` | 138/138 |
+| Ubuntu 24.04 (WSL) | zsh 5.9 as `sh` | 138/138 |
+| Ubuntu 24.04 (WSL) | zsh 5.9 as the hook shell | 139/139 |
+| Alpine 3.24 (container) | BusyBox 1.37 `ash` and tools | 119/119; no git, svn or node there |
+
+Run against the scripts as they were before the review of 25 November 2026, the same tests fail in
+39 places in dash, 66 with zsh as the hook shell and 27 in Windows PowerShell.
 
 A manual check from cmd.exe on Windows 11 also passed, in a repository whose path has a space:
 
@@ -598,14 +633,20 @@ Not run yet:
 
 - **macOS.** The shell script avoids what the macOS `sh` (bash 3.2) lacks or does differently. It
   never expands an empty `"$@"`, which bash 3.2 rejects under `set -u`. It also copes with file times
-  in whole seconds, as the BusyBox run shows. It has not run on a Mac.
-- **PowerShell 7.** The `.ps1` is written for it, but this machine has no `pwsh`.
+  in whole seconds, as the BusyBox run shows, and with zsh as the hook shell, as the Ubuntu run shows.
+  It has not run on a Mac.
+- **PowerShell 7.** The `.ps1` is written for it, but this machine has no `pwsh`. Where there is one,
+  run `ASB_TEST_POWERSHELL=pwsh.exe sh .claude/hooks/agent-skills-bridge.test.sh ps1`.
+- **A repository inside a OneDrive folder.** There Windows marks plain files and folders the way it
+  marks links. The PowerShell twin tells them apart by the link type, which was checked against a
+  OneDrive folder, but no sync has run inside one.
 - **The manual test, end to end in a live session.** Its commands and expected `status` outputs
   were dry-run on Windows, with the hooks run the way Claude Code runs them.
 
 The hooks were also checked live in Claude Code 2.1.330 (Claude desktop on Windows 11), in throwaway
-repositories, with the previous layout. That layout kept the ignore rule in `.claude/skills/.gitignore`;
-the hooks and the sync logic are unchanged.
+repositories, with the previous layout. That layout kept the ignore rule in `.claude/skills/.gitignore`.
+The hook commands are the same today. The scripts have changed since, in the review of 25 November
+2026: how they walk folders, read the guard's event and report a sync that could not finish.
 
 - **Session start.** The skill was in Claude's list from the first prompt. The first sync took 6.8 s
   on a machine where security software makes each process start cost most of a second. A sync with
@@ -616,8 +657,9 @@ the hooks and the sync logic are unchanged.
 - **Desktop worktree.** The hooks, the copy and the watch all came from the main checkout, as
   described above.
 
-The guard's separate Write entry was added after the live check found the gap. It is covered by the
-tests here, but has not yet been run live. Claude Code's skill loader skips a folder without
+The guard's separate Write entry was added after the live check found the gap, and MultiEdit joined
+it after the review of 25 November 2026. Both are covered by the tests here, but have not yet been
+run live. Claude Code's skill loader skips a folder without
 `SKILL.md` silently, so the record folder is never mistaken for a skill (read in the 2.1.330 program).
 
 ## Removing it
