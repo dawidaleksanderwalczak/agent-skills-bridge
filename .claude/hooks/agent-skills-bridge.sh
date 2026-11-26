@@ -189,15 +189,30 @@ scan_source() {
   done
 }
 
-# Sets managed to the copies the bridge made, as the manifest records them.
+# Sets names to the skill names that the record file $1 lists, one on a line. A last line that lacks
+# its line end counts only when $2 is 1. In the manifest an editor may have left it so. In a stamp
+# it is a name that was cut short, because the sync was killed while it wrote the stamp.
+read_names() {
+  names=
+  [ -f "$1" ] || return 0
+  {
+    while IFS= read -r line || { [ "$2" = 1 ] && [ -n "$line" ]; }; do
+      line=${line%[[:cntrl:]]} # the carriage return of a record that someone saved with CRLF
+      case $line in '' | '#'*) continue ;; esac
+      if valid_name "$line"; then names="$names $line"; fi
+    done < "$1"
+  } 2> /dev/null # the sync that wrote a stamp may delete it this moment
+}
+
+# Sets managed to the copies that are the bridge's. The manifest lists the copies that a finished
+# sync made. A sync that began and has not ended lists its copies in its stamp, the ones it is about
+# to make among them: those are the bridge's too, though the manifest does not list them yet.
 read_manifest() {
-  managed=
-  [ -f "$manifest" ] || return 0
-  while IFS= read -r line || [ -n "$line" ]; do
-    line=${line%[[:cntrl:]]} # the carriage return of a manifest that someone saved with CRLF
-    case $line in '' | '#'*) continue ;; esac
-    if valid_name "$line"; then managed="$managed $line"; fi
-  done < "$manifest"
+  read_names "$manifest" 1
+  managed=$names
+  [ -s "$stamp" ] || return 0
+  read_names "$stamp" 0
+  for u in $names; do has "$managed" "$u" || managed="$managed $u"; done
 }
 
 # True when $1, or anything under it, changed at or after the stamp (taken when the last sync began).
@@ -241,7 +256,8 @@ plan() {
   gone=
   conflicts=
   fresh=1 # the last sync finished, so the stamp can be trusted
-  if [ ! -f "$stamp" ] || [ ! -f "$manifest" ] || [ "$stamp" -nt "$manifest" ]; then fresh=0; fi
+  # The stamp of a sync that has not ended holds text, and it is newer than the manifest.
+  if [ ! -f "$stamp" ] || [ ! -f "$manifest" ] || [ -s "$stamp" ] || [ "$stamp" -nt "$manifest" ]; then fresh=0; fi
   for n in $src_names; do
     if has "$managed" "$n"; then
       wanted="$wanted $n"
@@ -354,6 +370,22 @@ acquire_lock() {
   return 0
 }
 
+# Writes the stamp of a sync that has begun into the records. Unlike the stamp of a sync that has
+# ended, it holds text and is newer than the manifest: a sync that is killed midway counts as
+# unfinished, and the next one makes every copy again. The text names every copy that is the
+# bridge's, the ones this sync is about to make among them. So a copy is on record before it exists:
+# a sync that is killed after a new copy and before its manifest leaves nothing that the next plan
+# would take for someone's own skill.
+begin_sync() {
+  new=
+  for n in $stale; do has "$managed" "$n" || new="$new $n"; done
+  # shellcheck disable=SC2086 # validated names
+  {
+    printf '%s\n' '# A sync began here and has not ended. Its copies, the ones it was about to make among them:' \
+      $managed $new > "$stamp"
+  } 2> /dev/null
+}
+
 do_sync() {
   # Problems that persist are reported once per session, not on every file event.
   loud=0
@@ -400,9 +432,11 @@ do_sync() {
   : > "$lock/stamp"
   plan # again: a sync that held the lock may have done the work
   [ -n "$stale$gone" ] || return 0
-  # Until this sync ends, the stamp in the records is newer than the manifest: a sync that is killed
-  # midway counts as unfinished, and the next one makes every copy again.
-  : > "$stamp"
+  # No copy is made that is not on record.
+  begin_sync || {
+    note "Could not write $stamp, so nothing was copied."
+    return 0
+  }
   changed=1
   broken=0
   # shellcheck disable=SC2086 # validated names
@@ -422,16 +456,22 @@ do_sync() {
     rm -f "$manifest" "$stamp"
     return 0
   fi
-  # The stamp from before the plan and the manifest go into the records with one mv, the stamp
-  # first: should mv stop between the two, the sync still counts as unfinished.
-  {
+  # The manifest and the stamp from before the plan go into the records with one mv, the manifest
+  # first. Until the manifest is there, the stamp of the sync that has begun stays, and with it the
+  # names of the new copies. Should mv stop between the two, that stamp still marks the sync as
+  # unfinished.
+  if {
     echo '# Copies made by .claude/hooks/agent-skills-bridge.sh from .agents/skills. Do not edit.'
     for n in $kept; do echo "$n"; done
-  } > "$lock/manifest" && mv -f "$lock/stamp" "$lock/manifest" "$state/" || broken=1
-  # What could not be deleted or made whole must not pass for current, and nor may a sync whose
-  # records did not arrive. Without the stamp this sync counts as unfinished, and the next one makes
-  # every copy again.
-  [ "$broken" = 0 ] || rm -f "$stamp"
+  } > "$lock/manifest" && mv -f "$lock/manifest" "$lock/stamp" "$state/"; then
+    # What could not be deleted or made whole must not pass for current. Without the stamp this sync
+    # counts as unfinished, and the next one makes every copy again.
+    [ "$broken" = 0 ] || rm -f "$stamp"
+  else
+    # The records did not arrive, so this sync must not pass for finished either. mv may have moved
+    # the empty stamp all the same, so the stamp of a sync that has begun is written once more.
+    begin_sync
+  fi
 }
 
 # Tells Claude Code (JSON on stdout) or the person at a terminal what happened.
@@ -591,7 +631,9 @@ do_status() {
 }
 
 do_clean() {
-  [ -f "$manifest" ] || {
+  read_manifest
+  # After a first sync that was killed there is no manifest, and still there are copies.
+  [ -f "$manifest" ] || [ -n "$managed" ] || {
     echo "agent-skills bridge: no copies to delete."
     return 0
   }

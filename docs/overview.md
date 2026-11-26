@@ -142,8 +142,9 @@ set \' ; ASB_CMD=session . "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridg
 
 ### 4.4 Safety properties
 
-- **It touches only its own copies.** A manifest records what the bridge created. A skill that already
-  exists in `.claude/skills` is reported as a conflict and never overwritten.
+- **It touches only its own copies.** The bridge's records name what it created, and a sync puts a
+  copy on record before it makes it. A skill that already exists in `.claude/skills` is reported as a
+  conflict and never overwritten.
 - **It never writes through a link.** If `.claude/skills` or a copy is a symlink or a Windows junction,
   the bridge leaves it alone or unlinks it without following it. This matters on Windows, where
   PowerShell 5.1's `Remove-Item -Recurse` and some Java tools delete *through* junctions.
@@ -155,6 +156,9 @@ set \' ; ASB_CMD=session . "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridg
 - **An unfinished sync never passes for current.** If a copy cannot be replaced or deleted, for
   example because a program holds one of its files open, the bridge says so and the next hook tries
   again. The same holds for a sync that was killed midway.
+- **A killed sync leaves no copy without an owner.** Its copies are on record before they exist. The
+  next sync makes them again, or deletes them where the skill is gone by then. None is taken for
+  someone's own skill.
 - **An edit during a sync is not lost.** Each sync writes its time stamp before it looks at the
   skills, and the next sync copies every skill that holds a file changed at or after that stamp. A
   file that changes while a sync is running, for example during a `git pull`, is copied by the next
@@ -330,7 +334,10 @@ They cover:
   cases, the Git Bash and network spellings, and events with blanks in their JSON;
 - symlinks, junctions and link loops in a skill, links to nowhere, and a junction inside a copy;
 - a copy that cannot be replaced or deleted, and files that cannot be copied;
-- an edit that lands while a sync is running, and a sync that is killed midway;
+- an edit that lands while a sync is running;
+- a sync that is killed: midway, after it made a new copy, and before a copy has its `.gitignore`;
+- a sync that cannot write its stamp, and one whose manifest does not arrive;
+- a session that starts while another sync makes a new copy;
 - a stale lock, the kill switch, and paths with spaces, with a letter outside ASCII, and on a network
   share;
 - files saved with CRLF, read-only folders, `CDPATH`, and zsh with an alias from `.zshenv`;
@@ -345,13 +352,13 @@ They cover:
 
 | Platform | Result |
 |---|---|
-| Windows 11, Git Bash | 156 / 156 passed (Windows has no symlinks for the link cases) |
-| Windows 11, Windows PowerShell 5.1 | 150 / 150 passed |
-| Ubuntu 24.04 (WSL2), dash | 145 / 145 passed |
-| Ubuntu 24.04 (WSL2), bash 5.2 as `sh` | 145 / 145 passed |
-| Ubuntu 24.04 (WSL2), zsh 5.9 as `sh` | 145 / 145 passed |
-| Ubuntu 24.04 (WSL2), zsh 5.9 as the hook shell | 146 / 146 passed |
-| Alpine 3.24 container, BusyBox 1.37 | 126 / 126 passed (no git, svn or node in the image) |
+| Windows 11, Git Bash | 193 / 193 passed (Windows has no symlinks for the link cases) |
+| Windows 11, Windows PowerShell 5.1 | 187 / 187 passed |
+| Ubuntu 24.04 (WSL2), dash | 182 / 182 passed |
+| Ubuntu 24.04 (WSL2), bash 5.2 as `sh` | 182 / 182 passed |
+| Ubuntu 24.04 (WSL2), zsh 5.9 as `sh` | 182 / 182 passed |
+| Ubuntu 24.04 (WSL2), zsh 5.9 as the hook shell | 183 / 183 passed |
+| Alpine 3.24 container, BusyBox 1.37 | 163 / 163 passed (no git, svn or node in the image) |
 
 A case that needs something the system lacks is skipped: symlinks and file modes on Windows, junctions
 and network paths elsewhere.
@@ -418,8 +425,8 @@ changes how a sync writes its records.
   network share, the server stamps the files.
 - **An unfinished sync.** While a sync works, the stamp in the records is still newer than the
   manifest, as before, so a sync that is killed counts as unfinished. So does a sync whose stamp or
-  manifest does not arrive at the end: the shell script then deletes the stamp, and the PowerShell
-  twin stops before the manifest is in place. The next sync makes every copy again.
+  manifest does not arrive at the end. The next sync makes every copy again. What that stamp holds,
+  and in which order the two arrive, changed once more the same day: see the next section.
 - **The test** runs a sync whose script carries one more line: after the look at the skills, it
   edits a skill that the look found unchanged. No file time set by hand can stand in for that,
   because the moment lies inside one run. The test fails on the scripts of the code review, in dash,
@@ -432,6 +439,75 @@ changes how a sync writes its records.
 - **Old records.** Both scripts read the records that the earlier scripts wrote, and the earlier
   scripts read the new ones (checked by hand on Windows, in both directions).
 
+### A sync that is killed after a new copy (26 November 2026)
+
+The work on the time stamp turned up one more weakness. It was older than that work, and it got a
+change of its own, because the fix changes what the bridge records and when.
+
+| Finding | Fix |
+|---|---|
+| Both: a sync made its copies and wrote the manifest last. In between, a copy that was new had no entry in the manifest, and whoever looked then took it for someone's own skill. A session hook that started in that time reported a conflict where there was none. If the sync was killed in that time, because the hook's two minutes were over or someone closed Claude Code, the conflict stayed: the next sync reported it, never copied that skill again, and `clean` left the copy behind. After a first sync that was killed, that held for every skill. | Before a sync copies, it writes the names of the bridge's copies into its stamp, the ones it is about to make among them. Until its manifest is in place, every plan, the guard and `clean` read the names from there. |
+
+- **Why a record, and not a mark in the copy.** The other way would have been to recognise a copy by
+  the `.gitignore` that the bridge writes into it. It was rejected for three reasons.
+  - The mark comes too late. The file is written after the skill's files, and the shell script
+    copies all skills with one `cp`. A kill during the copy, which is the longest step, leaves copies
+    without it.
+  - The mark says too much. Any folder that holds the file would be the bridge's, at any time: a
+    copy that someone committed, or one carried over from another checkout.
+  - A copy whose skill is deleted after the kill would be in no record. No sync would delete it, and
+    `clean` would have to search every folder in `.claude/skills`.
+
+  A record is written before the copy exists, so it holds for a kill at any moment. The rule stays
+  the one it was: a folder is the bridge's when the bridge's records name it.
+- **What the stamp holds.** The stamp of a sync that has ended is empty, as before. The stamp of a
+  sync that has begun holds a comment line and the name of every copy of the bridge, one on a line:
+  the copies in the manifest and the new ones. A stamp with text marks a sync as unfinished. The
+  comparison of file times stays, for records that the scripts of before wrote. A killed sync of the
+  scripts as they are now is recognised without it, also where file times count in whole seconds and
+  the sync before ended in the same second.
+- **The order at the end.** The manifest now goes into the records first and the empty stamp second.
+  The names stay on record until the manifest lists them, and a stop between the two still reads as
+  unfinished. If the manifest cannot be put in place, for example because a program holds the old one
+  open, the stamp with the names stays too. The scripts of before marked such a sync as unfinished
+  and left its new copy without a record, as a kill did.
+- **No extra process.** The names are written with the shell's own `printf` and read with its
+  `read`, and only a stamp that is not empty is read at all. A sync with nothing to do still starts
+  no program, and a sync with work starts as many as before. Counted in dash, before and after: 7
+  for a sync that copies, 4 for one that only deletes a copy.
+- **Without the record, no copy.** If the stamp cannot be written, the sync says so and copies
+  nothing.
+- **Someone's own skill.** A sync puts a name on record only if it found no folder of that name. A
+  skill that someone keeps in `.claude/skills` is therefore never on record: it is a conflict before
+  a kill and after it, and `clean` leaves it alone. One limit remains. From a kill until the next
+  sync, the names that the killed sync put on record are the bridge's. A folder that someone creates
+  under such a name in that time is replaced by the copy. The same happens to a folder that someone
+  puts in the place of a finished copy. All three cases were checked by hand in dash.
+- **Tests.** Four scenarios use the helper that makes a test repository's script run one more line.
+  The first kills a sync after its last copy, where one copy is new. The second kills a first sync
+  when a copy has its files and not yet its `.gitignore`, and deletes that skill before the next
+  sync. The third takes the manifest away before it can be put in place. The fourth makes a sync
+  wait before it writes its manifest, and lets a session hook come in meanwhile. In each, no hook
+  reports a conflict, and the copy ends up in the manifest or is deleted. A skill of someone's own
+  that has the name of a skill in `.agents/skills` is still reported, and kept, also by `clean`,
+  which deletes the copy of a killed sync. Against the scripts as they were until then, 19 of the new
+  checks fail in dash and 14 in Windows PowerShell 5.1. In BusyBox 20 of them fail, and one older
+  check with them: the test that kills a sync midway no longer waits a second first, and without
+  that pause those scripts take the killed sync for finished, because BusyBox compares file times in
+  whole seconds.
+- **With real processes.** In dash on Ubuntu, a first sync of 3,000 skills ran for about five
+  seconds while twelve session hooks came in. With the scripts as they were until then, all twelve
+  reported conflicts. With the scripts as they are now, none did. The check of "An edit during a
+  sync" was repeated too, with the new order at the end: in three rounds, no copy stayed out of date.
+- **Both scripts, and old records.** Checked by hand on Windows. A sync of the shell script was
+  killed after a new copy, and the PowerShell twin took over; then the other way round. Each finished
+  the other's work without a conflict. Both scripts read the records of the scripts of before, and
+  those scripts read the new records: they ignore the text in a stamp and still see a killed sync as
+  unfinished, by its time. Two things stay as they were. A copy that a killed sync of the scripts of
+  before left behind is in no record, so it stays a conflict until someone deletes the folder. And
+  if the scripts of before sync after a kill of the new ones, they empty the stamp, and the new copy
+  is a conflict from then on.
+
 ### Adoption flows
 
 | Flow | Result |
@@ -441,7 +517,7 @@ changes how a sync writes its records.
 | git, fresh clone with `core.autocrlf=true` | The script arrives with LF (automated). |
 | git worktree | The copy is made, and the status is clean. |
 | svn checkout | `svn status` is clean, and the copies are ignored (automated). |
-| `sh` and PowerShell on the same checkout | They share the manifest and stamp, and neither redoes the other's work. |
+| `sh` and PowerShell on the same checkout | They share the manifest and stamp, and neither redoes the other's work. Each finishes a sync of the other that was killed. |
 
 ### cmd.exe check (25 November 2026)
 
@@ -466,7 +542,8 @@ installed.
 
 These ran before the reviews, with the earlier layout, which kept the ignore rule in
 `.claude/skills/.gitignore`. The hook commands are the same today; the scripts behind them have
-changed as the two review sections and "An edit during a sync" above describe. Claude Code's skill
+changed as the two review sections, "An edit during a sync" and "A sync that is killed after a new
+copy" above describe. Claude Code's skill
 loader skips a folder without `SKILL.md` silently, so the new record folder is never taken for a
 skill (read in the 2.1.330 program).
 
@@ -527,6 +604,7 @@ Write and NotebookEdit, without a filter.
 | Each Write or NotebookEdit call starts the guard | A small delay per call. It is noticeable only on machines with slow process starts. | The guard exits at once outside `.claude/skills`. Claude Code's `if` filter can't help for these tools. |
 | The file watcher can't see changes, for example in WSL on `/mnt/c` | Changes made outside Claude arrive at the next session start. | Start a new session, or run `sync` and `/reload-skills`. |
 | Claude Code adds native `.agents/skills` support | Claude Code may list each skill twice until the bridge is removed. | Follow the exit plan in section 11 and watch #31005. |
+| A copy that a kit from before 26 November 2026 left behind when its sync was killed | It is in no record. The bridge reports a conflict and does not copy that skill. | Delete the folder. The next hook makes the copy, and a kit of today puts it on record first. |
 | The two implementations drift apart | One platform starts behaving differently from the others. | One test suite runs both implementations against the same scenarios. |
 
 ---

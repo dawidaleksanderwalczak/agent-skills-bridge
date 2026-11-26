@@ -737,7 +737,6 @@ bridge "$M" sync > /dev/null
 check "the next sync copies the skill that changed meanwhile" grep -q 'Landed while a sync ran.' "$M/.claude/skills/alpha/SKILL.md"
 
 echo "25. a sync that is killed midway"
-sleep 1 # whole-second clocks: the killed sync's stamp must be newer than the last manifest
 skill "$M" beta "Third body."
 # The kill comes when every copy is made and the manifest is not yet written. In a subshell: the
 # shell reports a killed command, and that report belongs nowhere.
@@ -754,6 +753,145 @@ bridge "$M" sync > /dev/null
 st=$(bridge "$M" status 2>&1)
 check "the next sync finishes the work" contains "$st" 'copies are current'
 check "and leaves nothing half-made in the records" test "$(cd "$MS" && echo .[!.]* *)" = '.gitignore manifest stamp'
+
+echo "26. a sync that is killed after it made a new copy"
+K=$(new_repo killed)
+KS=$K/.claude/skills/.agent-skills-bridge
+skill "$K" alpha
+# A skill of someone's own, with the name of a skill in .agents/skills: a conflict before the kill,
+# and after it.
+mkdir -p "$K/.claude/skills/own"
+echo 'mine' > "$K/.claude/skills/own/SKILL.md"
+skill "$K" own
+sleep 1 # see 1
+bridge "$K" session > /dev/null
+skill "$K" gamma
+# As in 25, the kill comes when every copy is made and the manifest is not yet written. This time one
+# of the copies is new: the manifest of the sync before does not list it.
+# shellcheck disable=SC2016 # the bridge expands these, not the test
+meanwhile "$K" 'Copies made by' 'kill -9 $$' 'Stop-Process -Id $PID -Force'
+(bridge "$K" sync) > /dev/null 2>&1
+pristine "$K"
+check "the killed sync made the new copy" test -f "$K/.claude/skills/gamma/SKILL.md"
+check "and did not get to list it in the manifest" sh -c "! grep -qx gamma '$KS/manifest'"
+st=$(bridge "$K" status 2>&1)
+check "status counts the new copy as the bridge's" contains "$st" 'copy(ies): alpha gamma'
+check "and names only the skill of someone's own as a conflict" contains "$st" 'conflicts       own (in'
+bridge "$K" guard '{"tool_name":"Edit","tool_input":{"file_path":"'"$(tool_path "$K/.claude/skills/gamma/SKILL.md")"'"}}' > /dev/null 2>&1
+check "an edit inside the new copy is refused" test $? = 2
+sleep 1 # see 25
+touch -t 202001010000 "$KS/lock" # see 9
+out=$(bridge "$K" session 2>&1)
+check "the next session does not take the new copy for a skill of someone's own" lacks "$out" '.claude/skills/gamma exists'
+check "it still reports the skill that is someone's own" contains "$out" '.claude/skills/own exists and was not made by the bridge'
+check "and leaves that skill alone" grep -qx mine "$K/.claude/skills/own/SKILL.md"
+check "the new copy is in the manifest now" grep -qx gamma "$KS/manifest"
+check "the skill of someone's own is not" sh -c "! grep -qx own '$KS/manifest'"
+st=$(bridge "$K" status 2>&1)
+check "the copies are current again" contains "$st" 'copies are current'
+check "and the records hold nothing half-made" test "$(cd "$KS" && echo .[!.]* *)" = '.gitignore manifest stamp'
+if [ "$(id -u)" = 0 ]; then
+  echo "  skip the stamp that cannot be written (root writes anything)"
+else
+  # A copy is on record before it is made. So where the record cannot be written, nothing is copied.
+  skill "$K" epsilon
+  chmod a-w "$KS/stamp"
+  out=$(bridge "$K" session 2>&1)
+  chmod u+w "$KS/stamp"
+  check "a sync that cannot write its stamp says so" contains "$out" 'Could not write .claude/skills/.agent-skills-bridge/stamp'
+  check "and makes no copy" test ! -e "$K/.claude/skills/epsilon"
+fi
+# Once more, and then clean instead of a sync.
+skill "$K" delta
+# shellcheck disable=SC2016
+meanwhile "$K" 'Copies made by' 'kill -9 $$' 'Stop-Process -Id $PID -Force'
+(bridge "$K" sync) > /dev/null 2>&1
+pristine "$K"
+check "a second killed sync made a new copy too" test -f "$K/.claude/skills/delta/SKILL.md"
+touch -t 202001010000 "$KS/lock"
+bridge "$K" clean > /dev/null 2>&1
+check "clean deletes the copy that a killed sync made new" test ! -e "$K/.claude/skills/delta"
+check "and the copies in the manifest" sh -c "test ! -e '$K/.claude/skills/alpha' && test ! -e '$K/.claude/skills/gamma'"
+check "and keeps the skill of someone's own" grep -qx mine "$K/.claude/skills/own/SKILL.md"
+
+echo "27. a first sync that is killed before a copy has its .gitignore"
+Q=$(new_repo killed-first)
+QS=$Q/.claude/skills/.agent-skills-bridge
+skill "$Q" alpha
+skill "$Q" beta
+sleep 1 # see 1
+# The kill comes when the files of a skill are copied and the copy's .gitignore is not yet written:
+# nothing in the copy says who made it, and there is no manifest at all. The two scripts copy in
+# different ways, so each has its own line for the kill.
+# shellcheck disable=SC2016
+if [ "$impl" = ps1 ]; then at='Copy-Folder $from.FullName $to'; else at='could be copied: look for a broken link'; fi
+# shellcheck disable=SC2016
+meanwhile "$Q" "$at" 'kill -9 $$' 'Stop-Process -Id $PID -Force'
+(bridge "$Q" session) > /dev/null 2>&1
+pristine "$Q"
+check "the killed sync left a copy without its .gitignore" sh -c "test -f '$Q/.claude/skills/alpha/SKILL.md' && test ! -e '$Q/.claude/skills/alpha/.gitignore'"
+check "and no manifest" test ! -e "$QS/manifest"
+rm -rf "$Q/.agents/skills/alpha" # this skill goes before the next sync comes
+sleep 1 # see 25
+touch -t 202001010000 "$QS/lock" # see 9
+out=$(bridge "$Q" session 2>&1)
+check "the next session takes no copy for a skill of someone's own" lacks "$out" 'was not made by the bridge'
+check "it deletes the copy of the skill that is gone" test ! -e "$Q/.claude/skills/alpha"
+check "and copies the other skill, with its .gitignore" grep -qx '\*' "$Q/.claude/skills/beta/.gitignore"
+check "the manifest lists what is left" sh -c "grep -qx beta '$QS/manifest' && ! grep -qx alpha '$QS/manifest'"
+st=$(bridge "$Q" status 2>&1)
+check "then the copies are current" contains "$st" 'copies are current'
+check "and the records hold nothing half-made" test "$(cd "$QS" && echo .[!.]* *)" = '.gitignore manifest stamp'
+
+echo "28. a sync whose manifest does not arrive"
+skill "$Q" gamma
+# The copies are made, and then the manifest cannot be put in place, as when a program holds the old
+# one open on Windows. Here its file is taken away (the shell script), or its name is made to lead
+# nowhere (the PowerShell twin). Nobody is killed: the sync ends by itself.
+# shellcheck disable=SC2016
+meanwhile "$Q" 'Copies made by' 'rm -f "$lock/manifest" "$lock/stamp"' '$manifest = Join-Path $manifest nowhere'
+bridge "$Q" sync > /dev/null 2>&1
+pristine "$Q"
+check "the sync made a new copy" test -f "$Q/.claude/skills/gamma/SKILL.md"
+check "and its manifest did not arrive" sh -c "! grep -qx gamma '$QS/manifest'"
+st=$(bridge "$Q" status 2>&1)
+check "that sync does not pass for finished" contains "$st" 'out of date: beta gamma'
+check "and its new copy is no conflict" lacks "$st" 'conflicts'
+sleep 1 # see 25
+out=$(bridge "$Q" session 2>&1)
+check "the next session takes the new copy for the bridge's" lacks "$out" 'was not made by the bridge'
+check "and lists it in the manifest" grep -qx gamma "$QS/manifest"
+st=$(bridge "$Q" status 2>&1)
+check "then the copies are current" contains "$st" 'copies are current'
+check "and the records hold nothing half-made" test "$(cd "$QS" && echo .[!.]* *)" = '.gitignore manifest stamp'
+
+echo "29. a session that starts while another sync makes a new copy"
+H=$(new_repo two-hooks)
+skill "$H" alpha
+sleep 1 # see 1
+# The first sync makes its copy and then waits, for a minute at most, before it writes the manifest.
+# The session hook that comes in meanwhile finds a copy that no manifest lists, and waits for the
+# lock. Nobody is killed.
+# shellcheck disable=SC2016
+meanwhile "$H" 'Copies made by' \
+  'i=0; while [ ! -e go ] && [ "$i" -lt 60 ]; do sleep 1; i=$((i + 1)); done' \
+  'for ($i = 0; $i -lt 300 -and -not (Test-Path -LiteralPath (Join-Path $root go)); $i++) { Start-Sleep -Milliseconds 200 }'
+(bridge "$H" sync > /dev/null 2>&1) &
+first=$!
+tries=0
+while [ ! -f "$H/.claude/skills/alpha/SKILL.md" ] && [ "$tries" -lt 60 ]; do
+  sleep 1
+  tries=$((tries + 1))
+done
+(bridge "$H" session > "$base/second.out" 2>&1) &
+second=$!
+sleep 5 # the session hook has looked by now
+: > "$H/go"
+wait "$first" "$second"
+pristine "$H"
+check "the first sync had made its copy when the session hook came" test "$tries" -lt 60
+check "the session hook does not call that copy a skill of someone's own" sh -c "! grep -q 'was not made by the bridge' '$base/second.out'"
+check "and the copy is in the manifest when both are done" grep -qx alpha "$H/.claude/skills/.agent-skills-bridge/manifest"
 
 echo
 echo "$pass passed, $fail failed"

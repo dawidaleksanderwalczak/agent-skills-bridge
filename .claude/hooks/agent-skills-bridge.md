@@ -53,8 +53,13 @@ open, is reported too, and the next hook tries again. Such a copy never passes f
 The bridge decides by file times what to copy. Each sync writes a time stamp before it looks at the
 skills, and the next sync copies every skill that holds a file changed at or after that stamp. So a
 change that arrives while a sync is running, for example while `git pull` is still writing files, is
-not lost: the next hook copies it. A sync that was killed midway counts as unfinished, and the next
-one makes every copy again.
+not lost: the next hook copies it.
+
+The bridge keeps a record of its copies, and a sync puts a copy on record before it makes it. So the
+bridge never takes one of its copies for a skill of your own: not in a session that starts while
+another sync is still copying, and not after a sync that was killed midway, because the hook's two
+minutes were over or because someone closed Claude Code. A killed sync counts as unfinished. The
+next sync makes every copy again, and deletes the copy of a skill that is gone by then.
 
 ## Files
 
@@ -532,10 +537,11 @@ Cursor staff on its forum. The record folder has no `SKILL.md`, so no tool loads
 |---|---|
 | A skill is missing in Claude Code | Run `status`. For a brand-new checkout, accept the folder trust prompt: hooks run only in trusted folders. |
 | "Blocked by the agent-skills bridge" | Claude tried to edit a copy. It edits the named source file instead. |
-| "`.claude/skills/<name>` exists and was not made by the bridge" | A skill of the same name lives in `.claude/skills`. Move it to `.agents/skills`, or rename one of them. |
+| "`.claude/skills/<name>` exists and was not made by the bridge" | A skill of the same name lives in `.claude/skills`. Move it to `.agents/skills`, or rename one of them. If the folder is no skill of yours but a copy that a kit from before 26 November 2026 left behind when its sync was killed, delete the folder: the next hook copies the skill. |
 | "Could not replace `.claude/skills/<name>`; is a file in it open?", or "Could not delete the old copy" | A program holds a file of the copy open; on Windows that blocks deleting it. Close the file. The next hook tries again, and so does `sync`. Until then `status` reports the copies as out of date. |
 | "Not everything in `.agents/skills` could be copied" | A skill holds a link to nowhere, a link loop or a file that you may not read. The rest of the skill is copied. Repair or remove that entry. |
 | "Could not copy `.agents/skills/<name>`" | Its `SKILL.md` could not be read. The PowerShell twin also says so when the skill's folders are nested more than 16 deep, which it takes for a link loop. No copy is left behind, and every hook tries again. |
+| "Could not write `.claude/skills/.agent-skills-bridge/stamp`, so nothing was copied" | The bridge puts a copy on record before it makes it, and it could not write that record. The file is read-only, or a program holds it open. Free the file. The next hook tries again, and so does `sync`. |
 | `clean`: "could not delete: `<name>`" | As above: a file in that copy is open. The records stay, so close the file and run `clean` again. |
 | `status`: "git not ignored: `<name>`" | The copy lost its `.gitignore`, or someone committed it. Run `sync`. If git tracks the copy, run `git rm -r --cached .claude/skills/<name>`. |
 | `status`: "svn not ignored", or `svn status` lists copies | Set `svn:ignore` to `*` on `.claude/skills` (see the svn section). |
@@ -601,7 +607,10 @@ cover:
 - links, junctions and link loops in a skill, links to nowhere, and a junction that someone put into
   a copy;
 - a copy that cannot be replaced or deleted, and files that cannot be copied;
-- an edit that lands while a sync is running, and a sync that is killed midway;
+- an edit that lands while a sync is running;
+- a sync that is killed: midway, after it made a new copy, and before a copy has its `.gitignore`;
+- a sync that cannot write its stamp, and one whose manifest does not arrive;
+- a session that starts while another sync makes a new copy;
 - a stale lock and the off switch;
 - `status` and `clean`;
 - paths with spaces, with a letter outside ASCII, and network paths;
@@ -617,23 +626,31 @@ Results on 26 November 2026:
 
 | System | Shell | Result |
 |---|---|---|
-| Windows 11 | Git Bash (bash 5.3 as `sh`) | 156/156; Windows has no symlinks for the link cases |
-| Windows 11 | Windows PowerShell 5.1 | 150/150 |
-| Ubuntu 24.04 (WSL) | dash 0.5.12 | 145/145 |
-| Ubuntu 24.04 (WSL) | bash 5.2 as `sh` | 145/145 |
-| Ubuntu 24.04 (WSL) | zsh 5.9 as `sh` | 145/145 |
-| Ubuntu 24.04 (WSL) | zsh 5.9 as the hook shell | 146/146 |
-| Alpine 3.24 (container) | BusyBox 1.37 `ash` and tools | 126/126; no git, svn or node there |
+| Windows 11 | Git Bash (bash 5.3 as `sh`) | 193/193; Windows has no symlinks for the link cases |
+| Windows 11 | Windows PowerShell 5.1 | 187/187 |
+| Ubuntu 24.04 (WSL) | dash 0.5.12 | 182/182 |
+| Ubuntu 24.04 (WSL) | bash 5.2 as `sh` | 182/182 |
+| Ubuntu 24.04 (WSL) | zsh 5.9 as `sh` | 182/182 |
+| Ubuntu 24.04 (WSL) | zsh 5.9 as the hook shell | 183/183 |
+| Alpine 3.24 (container) | BusyBox 1.37 `ash` and tools | 163/163; no git, svn or node there |
 
 Run against the scripts as they were before the review of 25 November 2026, the tests of that review
 failed in 39 places in dash, 66 with zsh as the hook shell and 27 in Windows PowerShell. The test
 for an edit that lands while a sync is running came a day later. It fails against the scripts of
-that review, in dash, BusyBox and Windows PowerShell, and passes now.
+that review, in dash, BusyBox and Windows PowerShell, and passes now. The tests for a copy that is
+not yet in the manifest came the same day: a sync that is killed after it made a new copy, and a
+session that starts while another sync is copying. Against the scripts as they were until then, 19
+checks fail in dash, 21 in BusyBox and 14 in Windows PowerShell.
 
 The same was checked with real processes, in dash on Ubuntu: one process edited 600 skills, about
 one edit a millisecond, while two others ran sync after sync. When the edits stopped, one more sync
 had to bring every copy up to date. With the scripts of that review, 36, 78 and 30 copies stayed out
 of date in three rounds. With the scripts as they are now, none did.
+
+The two scripts share their records, so they were also checked by hand on one checkout, on Windows.
+A sync of the shell script was killed after it had made a new copy, and the PowerShell twin took
+over; then the other way round. Each finished the other's work and reported no conflict. Both read
+the records that the scripts of before wrote, and those scripts read the new records.
 
 A manual check from cmd.exe on Windows 11 also passed, in a repository whose path has a space:
 
@@ -661,7 +678,8 @@ The hooks were also checked live in Claude Code 2.1.330 (Claude desktop on Windo
 repositories, with the previous layout. That layout kept the ignore rule in `.claude/skills/.gitignore`.
 The hook commands are the same today. The scripts have changed since, in the review of 25 November
 2026: how they walk folders, read the guard's event and report a sync that could not finish. A day
-later the time stamp of a sync moved to before its look at the skills.
+later the time stamp of a sync moved to before its look at the skills, and a sync began to put its
+copies on record before it makes them.
 
 - **Session start.** The skill was in Claude's list from the first prompt. The first sync took 6.8 s
   on a machine where security software makes each process start cost most of a second. A sync with

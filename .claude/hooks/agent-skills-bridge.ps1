@@ -110,14 +110,37 @@ function Get-SourceNames {
   return , $names
 }
 
-# The copies the bridge made, as the manifest records them.
-function Get-ManagedNames {
+# The skill names that the record file $File lists, one on a line. A last line that lacks its line
+# end counts only with $LastLine. In the manifest an editor may have left it so. In a stamp it is a
+# name that was cut short, because the sync was killed while it wrote the stamp. The file is opened
+# so that it is in nobody's way: another run may write, replace or delete it meanwhile.
+function Get-RecordNames([string]$File, [bool]$LastLine) {
   $names = @()
-  if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { return , $names }
-  foreach ($line in [IO.File]::ReadAllLines($manifest)) {
-    $line = $line.TrimEnd("`r")
+  if (-not (Test-Path -LiteralPath $File -PathType Leaf)) { return , $names }
+  $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+  $stream = [IO.File]::Open($File, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+  try { $lines = (New-Object IO.StreamReader -ArgumentList $stream, $utf8).ReadToEnd().Split("`n") }
+  finally { $stream.Dispose() }
+  $count = $lines.Count
+  if (-not $LastLine) { $count-- }
+  for ($i = 0; $i -lt $count; $i++) {
+    $line = $lines[$i].TrimEnd("`r")
     if ($line -eq '' -or $line.StartsWith('#')) { continue }
     if (Test-ValidName $line) { $names += $line }
+  }
+  return , $names
+}
+
+# The copies that are the bridge's. The manifest lists the copies that a finished sync made. A sync
+# that began and has not ended lists its copies in its stamp, the ones it is about to make among
+# them: those are the bridge's too, though the manifest does not list them yet.
+function Get-ManagedNames {
+  $names = Get-RecordNames $manifest $true
+  $item = Get-Item -LiteralPath $stamp -Force -ErrorAction SilentlyContinue
+  if ($item -and $item.Length -gt 0) {
+    $more = @()
+    try { $more = Get-RecordNames $stamp $false } catch { } # the sync that wrote the stamp may delete it this moment
+    foreach ($n in $more) { if ($names -notcontains $n) { $names += $n } }
   }
   return , $names
 }
@@ -251,9 +274,11 @@ function Get-Plan {
   $manifestTime = [DateTime]::MaxValue
   $fresh = (Test-Path -LiteralPath $stamp -PathType Leaf) -and (Test-Path -LiteralPath $manifest -PathType Leaf)
   if ($fresh) {
-    $stampTime = Get-WriteTime $stamp
+    $stampItem = Get-Item -LiteralPath $stamp -Force
+    $stampTime = $stampItem.LastWriteTimeUtc
     $manifestTime = Get-WriteTime $manifest
-    if ($stampTime -gt $manifestTime) { $fresh = $false }
+    # The stamp of a sync that has not ended holds text, and it is newer than the manifest.
+    if ($stampItem.Length -gt 0 -or $stampTime -gt $manifestTime) { $fresh = $false }
   }
   foreach ($n in $plan.Source) {
     $copy = Join-Path $dst $n
@@ -401,9 +426,18 @@ function Invoke-Sync {
     [IO.File]::WriteAllText($newStamp, '', $utf8)
     $plan = Get-Plan # again: a sync that held the lock may have done the work
     if (($plan.Stale.Count + $plan.Gone.Count) -eq 0) { return }
-    # Until this sync ends, the stamp in the records is newer than the manifest: a sync that is
-    # killed midway counts as unfinished, and the next one makes every copy again.
-    [IO.File]::WriteAllText($stamp, '', $utf8)
+    # The stamp of a sync that has begun goes into the records. Unlike the stamp of a sync that has
+    # ended, it holds text and is newer than the manifest: a sync that is killed midway counts as
+    # unfinished, and the next one makes every copy again. The text names every copy that is the
+    # bridge's, the ones this sync is about to make among them. So a copy is on record before it
+    # exists: a sync that is killed after a new copy and before its manifest leaves nothing that the
+    # next plan would take for someone's own skill.
+    $new = @($plan.Stale | Where-Object { $plan.Managed -notcontains $_ })
+    $begun = "# A sync began here and has not ended. Its copies, the ones it was about to make among them:`n" +
+    ((@($plan.Managed) + $new | ForEach-Object { "$_`n" }) -join '')
+    # No copy is made that is not on record.
+    try { [IO.File]::WriteAllText($stamp, $begun, $utf8) }
+    catch { Add-Note 'Could not write .claude/skills/.agent-skills-bridge/stamp, so nothing was copied.'; return }
     $script:changed = $true
     $broken = $false
     $kept = @()
@@ -426,10 +460,11 @@ function Invoke-Sync {
     $text = "# Copies made by .claude/hooks/agent-skills-bridge.sh from .agents/skills. Do not edit.`n" + (($kept | ForEach-Object { "$_`n" }) -join '')
     $tmp = "$manifest.tmp"
     [IO.File]::WriteAllText($tmp, $text, $utf8)
-    # The stamp from before the plan and the manifest go into the records, the stamp first: should
-    # the sync stop between the two, it still counts as unfinished.
-    Move-Item -LiteralPath $newStamp -Destination $stamp -Force
+    # The manifest and the stamp from before the plan go into the records, the manifest first. Until
+    # the manifest is there, the stamp of the sync that has begun stays, and with it the names of the
+    # new copies. Should the sync stop between the two, that stamp still marks it as unfinished.
     Move-Item -LiteralPath $tmp -Destination $manifest -Force
+    Move-Item -LiteralPath $newStamp -Destination $stamp -Force
     # What could not be deleted or made whole must not pass for current. Without the stamp this sync
     # counts as unfinished, and the next one makes every copy again.
     if ($broken) { Remove-Item -LiteralPath $stamp -Force -ErrorAction SilentlyContinue }
@@ -572,7 +607,9 @@ function Show-Status {
 }
 
 function Invoke-Clean {
-  if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { 'agent-skills bridge: no copies to delete.'; return }
+  # After a first sync that was killed there is no manifest, and still there are copies.
+  $managed = Get-ManagedNames
+  if ($managed.Count -eq 0 -and -not (Test-Path -LiteralPath $manifest -PathType Leaf)) { 'agent-skills bridge: no copies to delete.'; return }
   if (-not (Enter-Lock)) { [Console]::Error.WriteLine('agent-skills bridge: another sync is running; try again.'); exit 1 }
   try {
     $managed = Get-ManagedNames
