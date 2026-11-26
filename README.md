@@ -24,7 +24,7 @@ The kit's files sit at the paths they take in a project: `.claude/` here becomes
 
 | File | What it is |
 |---|---|
-| [`.claude/settings.json`](.claude/settings.json) | The three hooks |
+| [`.claude/settings.json`](.claude/settings.json) | The hooks: four entries for three events |
 | [`.claude/hooks/agent-skills-bridge.sh`](.claude/hooks/agent-skills-bridge.sh) | The bridge in POSIX `sh`, for macOS, Linux and Windows with Git Bash |
 | [`.claude/hooks/agent-skills-bridge.ps1`](.claude/hooks/agent-skills-bridge.ps1) | The same bridge in PowerShell, for Windows without Git Bash, and for running it by hand in cmd or PowerShell |
 | [`.claude/hooks/agent-skills-bridge.md`](.claude/hooks/agent-skills-bridge.md) | The full documentation. It travels with the kit into every project. |
@@ -72,9 +72,9 @@ hooks run in Git Bash when Git for Windows is installed, and in Windows PowerShe
 2. If your project already had one of these files, finish by hand. The kit's documentation covers
    each case in
    [Adopt it next to an existing `.claude` folder](.claude/hooks/agent-skills-bridge.md#adopt-it-next-to-an-existing-claude-folder).
-   - `.claude/settings.json`: add the kit's three hook entries to it. Claude Code can do this: ask it
-     to "add the three agent-skills-bridge hooks from ../agent-skills-bridge/.claude/settings.json to
-     ours".
+   - `.claude/settings.json`: add the kit's four hook entries to it, two of them under `PreToolUse`.
+     Claude Code can do this: ask it to "add the four agent-skills-bridge hook entries from
+     ../agent-skills-bridge/.claude/settings.json to ours".
    - `.claude/hooks/.gitattributes`: add the line `*.sh text eol=lf`.
    - `.claude/skills/.gitignore`: nothing to do. The bridge needs no line in it.
    - A root `.gitignore` that ignores `.claude/`: git can't see the kit. Change the rule as that
