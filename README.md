@@ -5,7 +5,7 @@ A Claude Code plugin that makes Claude Code load the Agent Skills in `.agents/sk
 ## Why
 
 Codex, GitHub Copilot, Cursor, JetBrains Junie and OpenCode read a project's skills from
-`.agents/skills`. Claude Code does not: it reads only `.claude/skills`
+`.agents/skills`. **Claude Code does not**: it reads only `.claude/skills`
 ([anthropics/claude-code#31005](https://github.com/anthropics/claude-code/issues/31005) is still
 open). Without a bridge, a team keeps every skill twice.
 
