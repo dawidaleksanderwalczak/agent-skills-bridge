@@ -11,6 +11,25 @@ The bridge closes the gap on its own. Claude Code runs it from hooks in `.claude
 copies every skill from `.agents/skills` to `.claude/skills`. The copies are read-only, ignored by
 version control and never committed. Nobody has to install or run anything.
 
+## Contents
+
+- [How it works](#how-it-works)
+- [Copies and skills of your own](#copies-and-skills-of-your-own)
+- [Files](#files)
+- [Install or update it](#install-or-update-it): the installer skill
+- [Adopt it in a git repository](#adopt-it-in-a-git-repository): the same by hand
+- [Adopt it next to an existing `.claude` folder](#adopt-it-next-to-an-existing-claude-folder)
+- [Adopt it in an svn working copy](#adopt-it-in-an-svn-working-copy)
+- [Claude desktop worktree sessions](#claude-desktop-worktree-sessions)
+- [Everyday use](#everyday-use): `status`, `sync`, `clean` and the off switch
+- [Manual test](#manual-test): ten minutes, six checks
+- [What the other tools see](#what-the-other-tools-see)
+- [Writing skills that work everywhere](#writing-skills-that-work-everywhere)
+- [Troubleshooting](#troubleshooting): each message, its cause and the fix
+- [The hook command](#the-hook-command)
+- [Testing](#testing)
+- [Removing it](#removing-it)
+
 ## How it works
 
 1. **Session start.** A `SessionStart` hook copies new and changed skills to
@@ -160,7 +179,6 @@ The bridge can only be as sure as these signs are:
 | `.claude/settings.json` | yes | The hooks: four entries for three events |
 | `.claude/hooks/agent-skills-bridge.sh` | yes | The bridge for macOS, Linux and Windows with Git Bash (POSIX `sh`) |
 | `.claude/hooks/agent-skills-bridge.ps1` | yes | The same bridge for Windows without Git Bash, and for running it by hand in cmd or PowerShell (PowerShell 5.1 or 7) |
-| `.claude/hooks/agent-skills-bridge.test.sh` | yes | Scenario tests for both |
 | `.claude/hooks/agent-skills-bridge.md` | yes | This page |
 | `.claude/hooks/.gitattributes` | yes (git) | Keeps the shell scripts LF in every git checkout |
 | `.claude/skills/.gitignore` | yes (git) | The anchor. It keeps the folder in every checkout and ignores nothing |
@@ -168,12 +186,39 @@ The bridge can only be as sure as these signs are:
 | `.claude/skills/<name>/` | no, ignored | Generated copies, each with its own `.gitignore` |
 | `.claude/skills/.agent-skills-bridge/` | no, ignored | The bridge's records: what it copied, when, and its lock |
 
+## Install or update it
+
+The kit's repository holds a Claude Code plugin, `agent-skills-bridge`. Its one skill installs the
+kit. With the plugin added, type `/agent-skills-bridge:installing-agent-skills-bridge` in Claude
+Code, in the project. The repository's README says how to add the plugin. The skill's installer, a
+Python script:
+
+- copies the kit's files in the table above to `.claude/hooks`, and replaces them when the kit is
+  newer;
+- adds the four hook entries to `.claude/settings.json`, next to the settings and hooks that are
+  already there;
+- adds the two files that git needs, or sets the two properties that svn needs;
+- runs `status` and checks its answer.
+
+It replaces no setting of yours and commits nothing. When something is in its way, it changes
+nothing and says what: a `.claude/settings.json` that is not valid JSON, a link in the place of a
+folder, a `.gitignore` that hides the kit. To update the kit, update the plugin and run the skill
+again.
+
+The next three sections describe the same steps for doing them by hand, and what the installer does
+in each case.
+
 ## Adopt it in a git repository
 
-1. Copy `.claude/hooks/agent-skills-bridge.*`, `.claude/hooks/.gitattributes` and
-   `.claude/skills/.gitignore` from this repository.
-2. Add the hooks from `.claude/settings.json` to yours: four entries for three events. If you have no `.claude/settings.json`,
-   copy the file as it is. If you already have a `.claude` folder, also read
+This is the installation by hand, for a machine without Python. The kit's files are in
+`plugins/agent-skills-bridge/skills/installing-agent-skills-bridge/assets/kit` of the kit's
+repository. That folder stands for your `.claude` folder.
+
+1. Copy `hooks/agent-skills-bridge.*` and `hooks/.gitattributes` from there to `.claude/hooks`, and
+   `skills/.gitignore` to `.claude/skills`.
+2. Add the hooks from the kit's `settings.json` to your `.claude/settings.json`: four entries for
+   three events. If you have no `.claude/settings.json`, copy the file as it is. If you already
+   have a `.claude` folder, also read
    [the next section](#adopt-it-next-to-an-existing-claude-folder).
 3. Put your skills in `.agents/skills/<name>/SKILL.md`, commit, and check the result:
 
@@ -196,7 +241,9 @@ the folder. `git status` then lists it, so you can commit it.
 
 Apart from the anchor and `.claude/hooks/.gitattributes`, every kit file name starts with
 `agent-skills-bridge`. The bridge writes only inside `.claude/skills`, and only to its copies and its
-record folder. Here is what to do about what you already have:
+record folder. Here is what to do about what you already have. The installer does what the rows
+for `.claude/settings.json`, `.claude/hooks` and `.claude/skills/.gitignore` say. At a link, and at
+a root `.gitignore` that ignores `.claude/`, it stops and says so:
 
 | You already have | What to do |
 |---|---|
@@ -233,9 +280,9 @@ add them next to your own entries under the same event names. The result has thi
 }
 ```
 
-The `...` stands for the rest of each command: copy the full strings. Claude Code can do the merge
-for you. Ask it to "add the four agent-skills-bridge hook entries from the kit's settings.json to
-ours".
+The `...` stands for the rest of each command: copy the full strings. The installer does this
+merge. It leaves your entries where they are, replaces the entries of an older kit, and keeps the
+file's indentation and line endings. It does not touch a file that it cannot read as JSON.
 
 **A root `.gitignore` that ignores `.claude/`.** Git cannot re-include files inside an ignored
 folder, so ignore the folder's contents instead and let the kit through:
@@ -250,7 +297,14 @@ folder, so ignore the folder's contents instead and let the kit through:
 `settings.local.json` and everything else in `.claude` stay ignored. The copies stay ignored as well,
 through their own `.gitignore`.
 
+The installer makes this change once you agree to it (its `--fix-gitignore` option). For a rule
+without a leading slash it writes `**/.claude/*` and `!/.claude/settings.json` and so on, so that
+`.claude` folders further down the tree stay ignored as before.
+
 ## Adopt it in an svn working copy
+
+The installer does all of this except the commit and `.agents`: it schedules the kit's files,
+sets the two properties, and keeps an `svn:ignore` value that is already there. By hand:
 
 Copy the same files as for git (step 1), except the two git files: `.claude/hooks/.gitattributes` and
 `.claude/skills/.gitignore`. Then run:
@@ -261,7 +315,7 @@ svn mkdir --parents .claude/skills
 printf '*\n' > svn-ignore.txt
 svn propset svn:ignore -F svn-ignore.txt .claude/skills
 rm svn-ignore.txt
-svn propset svn:eol-style LF .claude/hooks/agent-skills-bridge.sh .claude/hooks/agent-skills-bridge.test.sh
+svn propset svn:eol-style LF .claude/hooks/agent-skills-bridge.sh
 svn commit -m "Share .agents/skills with Claude Code"
 ```
 
@@ -683,7 +737,7 @@ set \' ; test -r "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-skills-bridge.sh" || e
   inert. PowerShell then runs the `.ps1` file and passes its exit code on. Without the `.ps1` it
   prints an error and exits with 0.
 - **If you adopted the kit earlier**, your `settings.json` holds the command without the test. It
-  keeps working; copy the new strings when you next update the kit.
+  keeps working; the installer puts the new strings in when you next update the kit.
 - **Not for cmd.** Typed into cmd, the command fails with "The filename, directory name, or volume
   label syntax is incorrect". To run the bridge by hand, use the commands under
   [Everyday use](#everyday-use).
@@ -692,163 +746,10 @@ Sourcing (`.`) instead of starting `sh` saves one process per hook run.
 
 ## Testing
 
-These are the automated tests. To check a real Claude Code session by hand, follow the
-[manual test](#manual-test).
-
-```sh
-sh .claude/hooks/agent-skills-bridge.test.sh        # the sh bridge, in any POSIX shell
-sh .claude/hooks/agent-skills-bridge.test.sh ps1    # the PowerShell bridge (Git Bash on Windows)
-ASB_TEST_SHELL=zsh sh .claude/hooks/agent-skills-bridge.test.sh   # the sh bridge, hooks run in zsh
-```
-
-`ASB_TEST_SHELL` names the shell that runs the hook commands (default: `sh`).
-`ASB_TEST_POWERSHELL` names the PowerShell for `ps1` (default: `powershell.exe`), for example
-`pwsh.exe`.
-
-The tests run the exact commands from `.claude/settings.json`, the way Claude Code runs them. They
-cover:
-
-- the first sync, source edits, removals, conflicts and repairs;
-- a sync with nothing to do, which must start no program;
-- the guard: the four editing tools, one copy and two, relative paths, `.` and `..`, other letter
-  cases, the Git Bash and network spellings, and events with blanks in their JSON;
-- links, junctions and link loops in a skill, links to nowhere, a junction up to the repository, a
-  junction to a junction, and a junction or a read-only folder that someone put into a copy;
-- a copy that cannot be replaced or deleted, and a file that cannot be copied at first and can
-  later;
-- hooks whose script is missing, and a skill folder with a name the bridge cannot use;
-- an edit that lands while a sync is running;
-- a sync that is killed: midway, after it made a new copy, before a copy has its `.gitignore`, and
-  after it could not replace a copy;
-- a sync that cannot write its stamp, and one whose manifest does not arrive;
-- a session that starts while another sync makes a new copy;
-- what a killed sync of the PowerShell twin leaves in the records;
-- `clean` after a first sync that left no manifest, because it was killed or because its manifest
-  did not arrive;
-- a skill of your own that takes the place of a copy: put there by git, when you check out a branch
-  that tracks it in `.claude/skills`, or moved there by hand, each with `sync` and with `clean`;
-- the cases next to it: a branch that has the skill in both places, a git that is at work, a git
-  that fails, a folder that git tracks under a name in another letter case, a skill that a file
-  manager moves over its copy, a copy whose `SKILL.md` was changed before its skill went, a copy
-  that only gained a file, and a file or an empty folder in the place of a copy;
-- the way back to the branch that has the skill in `.agents/skills`, where the copy is made again;
-- a sync that finds a skill of your own and is killed, records that the scripts of before left
-  unfinished, and records that were lost;
-- a skill with a file and a folder dated ahead of the clock: copied once, and again when something
-  next to them changes or one of them comes with a later time;
-- a stale lock and the off switch;
-- `status` and `clean`;
-- paths with spaces, with a letter outside ASCII, and network paths;
-- files saved with CRLF, read-only folders, `CDPATH`, and zsh with an alias and an option from
-  `.zshenv`;
-- in git: an existing `.claude/skills` with its own skill and `.gitignore`, a copy that someone
-  added to git, a copy that lost its `.gitignore`, and a clone with `core.autocrlf=true`;
-- in svn: `svn:ignore`, a skill of your own, and a changed copy that someone added to svn.
-
-A case that needs something the system lacks is skipped, and the test says so: symlinks and file
-modes on Windows, junctions and network paths elsewhere, git, svn or node where they are missing.
-
-Results on 26 November 2026:
-
-| System | Shell | Result |
-|---|---|---|
-| Windows 11 | Git Bash (bash 5.3 as `sh`) | 313/313; Windows has no symlinks for the link cases |
-| Windows 11 | Windows PowerShell 5.1 | 310/310 |
-| Ubuntu 24.04 (WSL) | dash 0.5.12 | 296/296 |
-| Ubuntu 24.04 (WSL) | bash 5.2 as `sh` | 296/296 |
-| Ubuntu 24.04 (WSL) | zsh 5.9 as `sh` | 296/296 |
-| Ubuntu 24.04 (WSL) | zsh 5.9 as the hook shell | 298/298 |
-| Alpine 3.24 (container) | BusyBox 1.37 `ash` and tools | 242/242; no git, svn or node there |
-
-Run against the scripts as they were before the review of 25 November 2026, the tests of that review
-failed in 39 places in dash, 66 with zsh as the hook shell and 27 in Windows PowerShell. The test
-for an edit that lands while a sync is running came a day later. It fails against the scripts of
-that review, in dash, BusyBox and Windows PowerShell, and passes now. The tests for a copy that is
-not yet in the manifest came the same day: a sync that is killed after it made a new copy, and a
-session that starts while another sync is copying. Against the scripts as they were until then, 19
-checks fail in dash, 21 in BusyBox and 14 in Windows PowerShell. Two more tests followed: a sync
-that could not replace a copy and is killed before it deletes its stamp, and the files that a killed
-sync of the PowerShell twin leaves in the records. Against the scripts of the step before, 3 checks
-fail in dash and in BusyBox, and 2 in Windows PowerShell.
-
-The same was checked with real processes, in dash on Ubuntu: one process edited 600 skills, about
-one edit a millisecond, while two others ran sync after sync. When the edits stopped, one more sync
-had to bring every copy up to date. With the scripts of that review, 36, 78 and 30 copies stayed out
-of date in three rounds. With the scripts as they are now, none did.
-
-The two scripts share their records, so they were also checked by hand on one checkout, on Windows.
-A sync of the shell script was killed after it had made a new copy, and the PowerShell twin took
-over; then the other way round. Each finished the other's work and reported no conflict. Both read
-the records that the scripts of before wrote, and those scripts read the new records.
-
-A second review on 26 November 2026 added more checks. Run against the kit as it was before that
-review, 8 of them fail in dash, 10 with zsh as the hook shell and 17 in Windows PowerShell.
-`docs/overview.md` lists what that review found, and what it left open.
-
-That review and the work on the records were done side by side, and both changed how `clean`
-begins. When the two were brought together, one more test came: `clean` after a first sync that
-left no manifest. Against the scripts of the second review alone, 5 of its 12 checks fail, and 6
-against the scripts from before both. The numbers are the same in all seven environments above.
-
-The tests for a skill of your own in the place of a copy came the same day: a branch that tracks
-the skill in `.claude/skills`, a move by hand, `clean` in both states, and a sync that is killed
-when it has just found such a skill. Against the scripts as they were until then, 40 checks fail in
-dash, with zsh as the hook shell and in Windows PowerShell, and 20 in BusyBox, which has no git and
-no svn. The two scripts were checked again on one checkout, and against each other's records of
-before, with checks of their own. A sync and a `clean` of the shell script were also killed after
-every line that they pass through, 548 times in all: each time the next sync left your own skills
-where they were and finished the work. A sync still starts 7 programs to copy and 4 to
-delete, and a hook with nothing to do starts none. `docs/overview.md` says where the line runs
-between an edited copy and a skill of your own, and why.
-
-One more test followed: a skill that holds a file dated ahead of the clock. Such a skill was copied
-again at every hook, with 7 programs each time. Now a sync that copies it starts 8, and the hooks
-after it start none. Against the scripts of before, 4 of the 9 checks fail in dash, with zsh as the
-hook shell, in BusyBox and in Windows PowerShell.
-
-A manual check from cmd.exe on Windows 11 also passed, in a repository whose path has a space:
-
-- the PowerShell twin's `sync`, `status` and `clean`, from the repository and from another folder;
-- `status` through Git's `sh.exe`, called by its full path;
-- the SessionStart and guard hook commands in Git Bash and in PowerShell, with cmd's environment;
-- the rule Claude Code uses to find Git Bash, applied in cmd: it found a per-user Git install
-  through PATH.
-
-Not run yet:
-
-- **macOS.** The shell script avoids what the macOS `sh` (bash 3.2) lacks or does differently. It
-  never expands an empty `"$@"`, which bash 3.2 rejects under `set -u`. It also copes with file times
-  in whole seconds, as the BusyBox run shows, and with zsh as the hook shell, as the Ubuntu run shows.
-  It has not run on a Mac.
-- **PowerShell 7.** The `.ps1` is written for it, but this machine has no `pwsh`. Where there is one,
-  run `ASB_TEST_POWERSHELL=pwsh.exe sh .claude/hooks/agent-skills-bridge.test.sh ps1`.
-- **A repository inside a OneDrive folder.** There Windows marks plain files and folders the way it
-  marks links. The PowerShell twin tells them apart by the link type, which was checked against a
-  OneDrive folder, but no sync has run inside one.
-- **The manual test, end to end in a live session.** Its commands and expected `status` outputs
-  were dry-run on Windows, with the hooks run the way Claude Code runs them.
-
-The hooks were also checked live in Claude Code 2.1.330 (Claude desktop on Windows 11), in throwaway
-repositories, with the previous layout. That layout kept the ignore rule in `.claude/skills/.gitignore`.
-The hook commands are the same today. The scripts have changed since, in the review of 25 November
-2026: how they walk folders, read the guard's event and report a sync that could not finish. A day
-later the time stamp of a sync moved to before its look at the skills, a sync began to put its
-copies on record before it makes them, and the bridge began to make sure that a folder is still its
-copy before it deletes or replaces it.
-
-- **Session start.** The skill was in Claude's list from the first prompt. The first sync took 6.8 s
-  on a machine where security software makes each process start cost most of a second. A sync with
-  nothing to do takes about half a second.
-- **Live sync.** A source edit reached the copy in 1.3 s, and the same session then used the new
-  version. A deleted skill's copy was gone in 1.5 s.
-- **Guard.** An Edit of a copy was refused with the bridge's message.
-- **Desktop worktree.** The hooks, the copy and the watch all came from the main checkout, as
-  described above.
-
-The guard's separate Write entry was added after the live check found the gap, and MultiEdit joined
-it after the review of 25 November 2026. Both are covered by the tests here, but have not yet been
-run live. Claude Code's skill loader skips a folder without
-`SKILL.md` silently, so the record folder is never mistaken for a skill (read in the 2.1.330 program).
+The automated tests live in the kit's repository, not in your project. There,
+`tests/agent-skills-bridge.test.sh` runs both scripts through the hook commands of the kit's
+`settings.json`, and `docs/testing.md` lists what the tests cover and where they passed. To check
+a real Claude Code session on your own machine, follow the [manual test](#manual-test).
 
 ## Removing it
 

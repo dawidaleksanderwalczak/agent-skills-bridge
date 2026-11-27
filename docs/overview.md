@@ -109,7 +109,6 @@ flowchart LR
 | `.claude/settings.json` | yes | The hooks: `SessionStart`, `FileChanged`, and `PreToolUse` in two entries |
 | `.claude/hooks/agent-skills-bridge.sh` | yes | The bridge, in POSIX `sh`, for macOS, Linux and Windows with Git Bash |
 | `.claude/hooks/agent-skills-bridge.ps1` | yes | The same bridge for Windows without Git Bash, in PowerShell 5.1 or 7, and the way to run the bridge by hand in cmd or PowerShell |
-| `.claude/hooks/agent-skills-bridge.test.sh` | yes | Scenario tests for both implementations |
 | `.claude/hooks/agent-skills-bridge.md` | yes | Documentation for maintainers and users |
 | `.claude/hooks/.gitattributes` | yes (git) | Keeps the shell scripts LF in every git checkout |
 | `.claude/skills/.gitignore` | yes (git) | The **anchor**. It keeps the folder in every checkout and contains only comments |
@@ -242,12 +241,46 @@ skills setting. In OpenCode 1.x, set `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1`.
 
 ## 6. Adoption
 
+### The installer skill
+
+The skill `installing-agent-skills-bridge` does the adoption. It comes in a Claude Code plugin,
+`agent-skills-bridge`, and this repository is the plugin's marketplace
+(`.claude-plugin/marketplace.json`). A user adds the plugin once per machine, and types
+`/agent-skills-bridge:installing-agent-skills-bridge` in a project; Claude never starts the skill by
+itself.
+
+The plugin only brings the installer to a machine. It holds the one skill, and no hook, command,
+agent or server, so adding it changes no session. The bridge itself stays in the project, in the
+project's own `.claude` folder: teammates get it with a pull and need no plugin. The plugin names
+no version, so Claude Code takes the commit as its version, and every commit on the default branch
+reaches the users who update.
+
+The skill's installer, `scripts/install_bridge.py`, is a Python script without dependencies. It
+takes the kit from the skill's own `assets/kit` folder and:
+
+1. looks first and writes later: a link in the place of a folder, a `settings.json` that is not
+   valid JSON and a `.gitignore` that hides the kit stop it before it has changed anything;
+2. creates the kit's own files, and replaces them when the kit is newer;
+3. adds the four hook entries to an existing `.claude/settings.json`, replaces the entries of an
+   older kit, and leaves every other setting, the indentation and the line endings as they are;
+4. adds `.claude/hooks/.gitattributes` and the anchor where git is used, or schedules the files
+   and sets `svn:ignore` and `svn:eol-style` where svn is;
+5. checks what it wrote, asks git whether the script stays LF and whether the kit is visible, and
+   runs `status` in the shell that Claude Code will run the hooks in.
+
+A write that fails, or a check that fails, puts every file back. The installer never commits. Its
+exit code is the verdict: 0 for installed and verified, 1 for blocked with nothing changed, 3 for
+changed but not complete. The skill lets the agent call the bridge installed on 0 only.
+
+The steps by hand follow. They are what the installer does.
+
 ### git
 
-1. Copy `.claude/hooks/agent-skills-bridge.*`, `.claude/hooks/.gitattributes` and
-   `.claude/skills/.gitignore` into the repository.
-2. Add the hooks from `.claude/settings.json` to the repository's settings, or copy the file if it has
-   none.
+1. Copy the kit's files from the skill's `assets/kit` folder into the repository:
+   `hooks/agent-skills-bridge.*` and `hooks/.gitattributes` to `.claude/hooks`, and
+   `skills/.gitignore` to `.claude/skills`.
+2. Add the hooks from the kit's `settings.json` to the repository's `.claude/settings.json`, or copy
+   the file if it has none.
 3. Put the skills in `.agents/skills/<name>/SKILL.md` and commit.
 
 ### svn
@@ -258,7 +291,7 @@ Copy the same files, except the two git files. Then run:
 svn add --parents .claude/settings.json .claude/hooks/agent-skills-bridge.* .agents
 svn mkdir --parents .claude/skills
 printf '*\n' > svn-ignore.txt && svn propset svn:ignore -F svn-ignore.txt .claude/skills && rm svn-ignore.txt
-svn propset svn:eol-style LF .claude/hooks/agent-skills-bridge.sh .claude/hooks/agent-skills-bridge.test.sh
+svn propset svn:eol-style LF .claude/hooks/agent-skills-bridge.sh
 svn commit -m "Share .agents/skills with Claude Code"
 ```
 
@@ -269,14 +302,14 @@ must therefore come from a file (`-F`), or be set in TortoiseSVN's Properties di
 
 | Already there | What to do |
 |---|---|
-| `.claude/settings.json` | Add the bridge's four hook entries next to your own: one for `SessionStart`, one for `FileChanged` and two for `PreToolUse`. Claude Code runs all matching hooks. Claude Code itself can do the merge. |
+| `.claude/settings.json` | Add the bridge's four hook entries next to your own: one for `SessionStart`, one for `FileChanged` and two for `PreToolUse`. Claude Code runs all matching hooks. The installer does the merge. |
 | Other hooks in `.claude/hooks` | Nothing. The kit's file names start with `agent-skills-bridge`. |
 | Claude-only skills in `.claude/skills` | git: nothing; the copies ignore only themselves. svn: add a new skill folder by name, since `svn:ignore` hides the folder's direct entries. |
 | A `.claude/skills/.gitignore` with your own rules | Keep it. The bridge never edits it and needs no line in it. |
 | A skill with the same name in both folders | Reported as a conflict, and both are left alone. |
 | A branch that still tracks a skill in `.claude/skills`, next to a branch that has moved it | On that branch the tracked skill is left alone and reported once. Back on the other branch the copy is made again. |
 | `.claude/skills` as a link (the usual hand-made workaround) | Left alone and reported. Delete the link to switch to the bridge. |
-| A root `.gitignore` that ignores `.claude/` | Replace the rule with `.claude/*`, `!.claude/settings.json`, `!.claude/hooks/` and `!.claude/skills/`. `settings.local.json` stays ignored. |
+| A root `.gitignore` that ignores `.claude/` | Replace the rule with `.claude/*`, `!.claude/settings.json`, `!.claude/hooks/` and `!.claude/skills/`. `settings.local.json` stays ignored. The installer does it once the user agrees. |
 
 The kit's documentation has a merged `settings.json` example.
 
@@ -343,7 +376,7 @@ bridge follows the same rule.
 
 ### Automated tests
 
-The tests run the exact hook commands from `.claude/settings.json`, the way Claude Code runs them.
+The tests run the exact hook commands from the kit's `settings.json`, the way Claude Code runs them.
 They cover:
 
 - the first sync, edits, removals (including a sync that only deletes) and conflicts;
@@ -873,6 +906,44 @@ change of its own.
 | svn checkout | `svn status` is clean, and the copies are ignored (automated). |
 | `sh` and PowerShell on the same checkout | They share the manifest and stamp, and neither redoes the other's work. Each finishes a sync of the other that was killed. |
 
+### The installer skill (26 November 2026)
+
+Until this day the adoption was done by hand, with copy commands from the README. The skill
+`installing-agent-skills-bridge` replaced them, and the kit moved from this repository's own
+`.claude` folder into the skill's `assets/kit` folder, so that one folder holds everything a project
+gets. The bridge's tests moved to `tests/` and gave the same counts from there.
+
+The installer has its own tests, `tests/test_install_bridge.py`. They start it as a program in
+throwaway git repositories, svn working copies and plain folders, and look at its exit code, its
+report and the files it left. [testing.md](testing.md) lists what they cover and where they passed.
+Two defects came out while it was written:
+
+| Finding | Fix |
+|---|---|
+| `git check-ignore -v` also names the rule that lets a path through, one that starts with `!`. The installer took its own rewritten `.gitignore` for one that still hides the kit, and put everything back. | A rule that starts with `!` does not count as ignoring. |
+| git names an ignore file from the top of the repository, not from the folder it is asked in. For a project below the top folder, the installer would have looked for the rule in the wrong `.gitignore`. | The installer resolves the name from the top folder, and rewrites a rule only in the project's own `.gitignore`. |
+
+The skill's text was tried on two fresh agents, a Haiku and a Sonnet model, that had only
+`SKILL.md` and a throwaway project. The first installed the kit with one command and reported it.
+The second met a `.gitignore` that ignores `.claude/`, stopped and asked, and did not pass the flag
+by itself. What the skill does not have yet is a run in a live Claude Code session: see
+"Not run yet" in [testing.md](testing.md).
+
+### The plugin (27 November 2026)
+
+Until this day a user got the skill by cloning this repository and copying the skill folder into
+the personal skills. The skill now comes in a Claude Code plugin, `plugins/agent-skills-bridge`, and
+the repository has a marketplace file, so that Claude Code installs it by name and updates it with
+a command. The kit's scripts and the installer did not change.
+
+The plugin was checked with Claude Code 2.1.332 on Windows 11, in a configuration folder of its own,
+so that the machine's own settings stayed as they were. `claude plugin validate` passed. Claude
+Code installed the plugin from the local folder and from a git address, where it cloned the
+repository and copied the plugin folder into its cache. The installer ran from that cache copy and
+installed the kit in a new repository. A headless session listed the plugin's command.
+[testing.md](testing.md) has the table. What is still missing is the same as before: a live session
+in which a user types the command.
+
 ### cmd.exe check (25 November 2026)
 
 A follow-up question was whether the kit also works for people who use cmd. The Claude Code program
@@ -937,7 +1008,7 @@ Write and NotebookEdit, without a filter.
 | Create symlinks or junctions locally with a script | rejected | Junctions hold absolute paths, and some recursive deletes follow them into the real skills. Each OS also needs its own code and privileges. |
 | Commit a mirrored copy of `.claude/skills` | rejected | Every change shows up twice in reviews, the two drift apart, and Cursor and similar tools list duplicates for everyone. |
 | Claude Code's `/import cursor` | rejected | It works only interactively, never refreshes a copy, and drops frontmatter such as `allowed-tools`. |
-| A Claude Code plugin | rejected | Plugins are copied into a cache and their skills get prefixed names. Every user must approve the install. |
+| A Claude Code plugin in place of the bridge, carrying the skills or the hooks | rejected | Plugins are copied into a cache and their skills get prefixed names. Every user must install and approve it, so nothing would reach a teammate with a pull. A plugin does carry the installer (section 6): one person needs it, once per machine. |
 | Make `.claude/skills` the canonical folder | rejected | Codex and Junie don't read it, and `.agents/skills` is the emerging standard. |
 | One `.gitignore` in `.claude/skills` for all copies | replaced | It hid Claude-only skills from git, and it did nothing where a team already had its own file there. |
 | **A local copy driven by Claude Code hooks, each copy ignoring itself** | **chosen** | It needs no setup, no symlinks and no generated files in version control. It works on every OS, in both VCSs and next to existing `.claude` content. Python's `venv` and pytest's cache use the same self-ignoring pattern. |
@@ -953,7 +1024,8 @@ Write and NotebookEdit, without a filter.
 | The organisation turns off project hooks (`disableAllHooks`, `allowManagedHooksOnly`) | The bridge doesn't run. | Run `sh .claude/hooks/agent-skills-bridge.sh sync` (in cmd or PowerShell, the `.ps1`), then `/reload-skills`. |
 | A Group Policy enforces `AllSigned` for PowerShell | On Windows without Git Bash, the `.ps1` doesn't run. | Install Git for Windows (hooks then run in Git Bash), or sign the script. |
 | svn: `svn:ignore *` also hides a new Claude-only skill folder | Someone must add it by name. | Documented. Files inside an added skill folder behave normally. |
-| Merging the hooks into an existing `settings.json` is manual | A wrong merge leaves the bridge off. | `status` reports missing hooks. Claude Code can do the merge on request. |
+| The installer writes an existing `settings.json` anew to add the hooks | A file that was laid out by hand loses that layout. A file with comments is not valid JSON, and the installer does not touch it. | The installer keeps indentation, line endings and the order of the keys, says when the layout changes, and keeps the file as it was in a folder outside the project. At a file it cannot read, it stops and names the kit's `settings.json` to merge by hand. |
+| Claude Code does not update a plugin from a marketplace like this one by itself | A machine keeps installing the kit it has until its user updates the plugin. | The README says how to update. The installer's report names the kit's version, and a second run with a newer plugin replaces what changed. |
 | Each Write or NotebookEdit call starts the guard | A small delay per call. It is noticeable only on machines with slow process starts. | The guard exits at once outside `.claude/skills`. Claude Code's `if` filter can't help for these tools. |
 | The file watcher can't see changes, for example in WSL on `/mnt/c` | Changes made outside Claude arrive at the next session start. | Start a new session, or run `sync` and `/reload-skills`. |
 | Claude Code adds native `.agents/skills` support | Claude Code may list each skill twice until the bridge is removed. | Follow the exit plan in section 11 and watch #31005. |
@@ -984,7 +1056,8 @@ The skills themselves stay where they are, in `.agents/skills`.
   [anthropics/claude-code#31005](https://github.com/anthropics/claude-code/issues/31005)
 - Agent Skills specification: <https://agentskills.io/specification>
 - Claude Code skills documentation: <https://code.claude.com/docs/en/skills>
-- Kit documentation: [`.claude/hooks/agent-skills-bridge.md`](../.claude/hooks/agent-skills-bridge.md),
-  which travels with the kit into every project
+- Kit documentation: [`agent-skills-bridge.md`](../plugins/agent-skills-bridge/skills/installing-agent-skills-bridge/assets/kit/hooks/agent-skills-bridge.md),
+  which the installer puts into every project as `.claude/hooks/agent-skills-bridge.md`
+- Tests and where they passed: [testing.md](testing.md)
 - The tool behaviour described here was checked against each tool's documentation in November 2026.
   Cursor's duplicate listing is documented only on its forum.

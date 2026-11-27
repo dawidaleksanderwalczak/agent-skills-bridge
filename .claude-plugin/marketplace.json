@@ -1,0 +1,14 @@
+{
+  "name": "agent-skills-bridge",
+  "description": "The agent-skills-bridge for Claude Code: one plugin, which installs the bridge from .agents/skills to .claude/skills in a project.",
+  "owner": {
+    "name": "Dawid Aleksander Walczak",
+    "url": "https://github.com/dawidaleksanderwalczak"
+  },
+  "plugins": [
+    {
+      "name": "agent-skills-bridge",
+      "source": "./plugins/agent-skills-bridge"
+    }
+  ]
+}
