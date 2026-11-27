@@ -1,7 +1,8 @@
 # Installing the kit by hand
 
 The [installer skill](../README.md#install) does all of this, and checks more than
-a person would. Use this page on a machine without Python 3.11.
+a person would. Use this page on a machine without Python 3.11 or newer. Where an older Python
+starts the installer, its report says `python too old` and names this page.
 
 The kit's files are in `plugins/agent-skills-bridge/skills/installing-agent-skills-bridge/assets/kit` of this repository. That
 folder stands for the project's `.claude` folder. The kit's documentation,

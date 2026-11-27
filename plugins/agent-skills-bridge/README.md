@@ -26,7 +26,8 @@ From a terminal, write `claude plugin` in place of `/plugin`.
 
 ## Install the bridge, once per project
 
-You need Python 3.11 or newer on PATH. Open the project in Claude Code and type:
+You need Python 3.11 or newer on PATH, under any name: `python3`, `python`, `py` or a versioned one
+such as `python3.12`. Open the project in Claude Code and type:
 
 ```text
 /agent-skills-bridge:installing-agent-skills-bridge

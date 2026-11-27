@@ -5,40 +5,202 @@ The kit makes Claude Code load the Agent Skills that a project keeps in .agents/
 copies the kit's files from ../assets/kit to the project's .claude folder, adds the kit's hooks to
 .claude/settings.json next to the hooks that are already there, sets what git or svn needs, and
 then checks its own work. It never commits, never prompts and never writes through a link.
+
+Its answer is one JSON object on stdout, the report, whose "outcome" says the same as the exit
+code. It writes nothing to stderr: Windows PowerShell 5.1 turns a program's stderr into errors of
+its own once it is redirected, and would then report a failure where there was none.
 """
+import json
+import os
+import re
+import subprocess
 import sys
 
-if sys.version_info < (3, 11):
-    sys.stderr.write(
-        "error: this installer needs Python 3.11 or newer, and this is Python %d.%d. "
-        "Start it with another interpreter: python3, python or py -3.\n" % sys.version_info[:2]
-    )
-    sys.exit(4)
+NEEDS = (3, 11)  # the oldest Python that the installer runs on
+
+EXIT_OK = 0  # installed or already current, and verified
+EXIT_BLOCKED = 1  # something is in the way: nothing in the project was changed
+EXIT_USAGE = 2  # wrong arguments
+EXIT_INCOMPLETE = 3  # the project was changed, but a later step failed
+EXIT_PYTHON = 4  # started with a Python older than 3.11, and no newer one is on PATH
+
+EXIT_CODES = (
+    "Exit codes, each with the report's 'outcome': "
+    "0 = installed or current: done and verified; or would change: what a dry run found. "
+    "1 = blocked: nothing in the project was changed; the report's 'blockers' say why. "
+    "2 = wrong arguments: the report's 'message' says which. "
+    "3 = incomplete: the project was changed, but a later step failed; the report's 'problems' say which. "
+    "4 = python too old: started with a Python older than 3.11, and no newer one is on PATH."
+)
+
+# -- a Python that is too old -------------------------------------------------------------------
+#
+# From here to the version check, the code also runs on a Python that is too old for the rest, so
+# it keeps to what Python 3.6 knows, and the whole file keeps to syntax that such a Python reads.
+# On many machines `python3` is older than 3.11 while a newer Python is there under another name,
+# python3.12 for example. The installer looks for that one and goes on with it, so that whoever
+# started it need not know the name.
+
+STARTED_BY = "ASB_INSTALLER_STARTED_BY"  # tells the newer Python which version started the installer
+VERSIONED = re.compile(r"python3\.(\d{1,3})")
+PROBE = "import os, sys; print('%d.%d.%d %s %s' % (tuple(sys.version_info[:4]) + (os.name,)))"
+# A first start can take this long where security software checks every new program.
+PROBE_TIMEOUT = 30
+
+
+def named_project(arguments):
+    """The folder that --project names on a command line, or None. The last one counts, as it does
+    for the parser."""
+    named = None
+    for index, argument in enumerate(arguments):
+        if argument == "--project" and index + 1 < len(arguments):
+            named = arguments[index + 1]
+        elif argument.startswith("--project="):
+            named = argument[len("--project=") :]
+    return named
+
+
+def same_folder(one, other):
+    """True when two paths name the same folder. The file system is asked, because a folder has
+    more than one spelling: through a link, in another letter case, as a short name on Windows."""
+    try:
+        return os.path.samefile(one, other)
+    except (OSError, ValueError):
+        return os.path.normcase(os.path.abspath(one)) == os.path.normcase(os.path.abspath(other))
+
+
+def pythons_on_path(avoid=()):
+    """The commands on PATH that may start another Python, best first: python3.<n> from the highest
+    n down, then python3, then python, then the py launcher on Windows. Each is a list to start a
+    process with. Only PATH entries that are absolute folders are searched, and never a folder in
+    `avoid`: the working directory and the project are input."""
+    windows = os.name == "nt"
+    avoided = [folder for folder in avoid if folder]
+    seen = set([os.path.normcase(os.path.abspath(sys.executable or os.curdir))])  # the Python that runs this
+    found = []
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        folder = folder.strip('"')
+        if not os.path.isabs(folder) or any(same_folder(folder, input_folder) for input_folder in avoided):
+            continue
+        try:
+            entries = sorted(os.listdir(folder))
+        except OSError:
+            continue  # PATH names folders that do not exist on most machines
+        for entry in entries:
+            name = entry.lower() if windows else entry
+            if windows:
+                if not name.endswith(".exe"):
+                    continue  # a .bat or .cmd wrapper would put the arguments through cmd.exe
+                name = name[:-4]
+            versioned = VERSIONED.fullmatch(name)
+            if versioned:
+                if (3, int(versioned.group(1))) < NEEDS:
+                    continue
+                order = (0, -int(versioned.group(1)))
+            elif name in ("python3", "python"):
+                order = (1 if name == "python3" else 2, 0)
+            elif windows and name == "py":
+                order = (3, 0)
+            else:
+                continue
+            path = os.path.join(folder, entry)
+            key = os.path.normcase(os.path.abspath(path))
+            if key in seen or os.path.isdir(path) or not (windows or os.access(path, os.X_OK)):
+                continue
+            seen.add(key)  # PATH often names a folder twice
+            found.append((order, len(found), [path, "-3"] if order[0] == 3 else [path]))
+    return [command for _, _, command in sorted(found)]
+
+
+def version_of(command):
+    """What a command answers when asked for its Python version and the system it is built for, as
+    ((3, 12, 4), "final", "nt"). None when it does not start, does not answer in time or is no
+    Python 3: PATH holds placeholders that only offer to install Python, and wrappers whose
+    Python is gone."""
+    try:
+        process = subprocess.Popen(command + ["-I", "-S", "-c", PROBE], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except (OSError, ValueError):
+        return None
+    try:
+        answer = process.communicate(timeout=PROBE_TIMEOUT)[0]
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        return None
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+) (\w+) (\w+)", answer.decode("ascii", "replace").strip())
+    if process.returncode != 0 or not match:
+        return None
+    return tuple(int(number) for number in match.group(1, 2, 3)), match.group(4), match.group(5)
+
+
+def go_on_with_a_newer_python():
+    """Start the installer again with a Python on PATH that is new enough, and return its exit
+    code. Where there is none, say so in a report and return EXIT_PYTHON."""
+    arguments = sys.argv[1:]
+    looked_at = []
+    chosen = None
+    commands = []
+    if not os.environ.get(STARTED_BY):  # a Python that was handed the installer hands it to no third one
+        try:
+            commands = pythons_on_path((os.getcwd(), named_project(arguments)))
+        except Exception:  # whatever happens here, the answer is the report below
+            pass
+    for command in commands:
+        found = version_of(command)
+        if found is None:
+            looked_at.append("%s: did not start" % " ".join(command))
+            continue
+        version, level, system = found
+        if system != os.name:
+            # On Windows, a Python of MSYS2 or Cygwin reads a path such as C:\Users differently.
+            looked_at.append("%s: Python %d.%d.%d, built for another system (%s)" % ((" ".join(command),) + version + (system,)))
+            continue
+        looked_at.append("%s: Python %d.%d.%d" % ((" ".join(command),) + version))
+        if version[:2] < NEEDS:
+            continue
+        if level == "final":
+            chosen = command
+            break
+        chosen = chosen or command  # a pre-release only if no final release turns up
+    if chosen is not None:
+        environment = dict(os.environ)
+        environment[STARTED_BY] = "%d.%d.%d" % tuple(sys.version_info[:3])
+        try:
+            return subprocess.call(chosen + ["-I", "-S", os.path.abspath(__file__)] + arguments, env=environment)
+        except OSError as error:
+            looked_at.append("%s: %s" % (" ".join(chosen), error.strerror or error))
+    report = {
+        "outcome": "python too old",
+        "message": "The installer needs Python %d.%d or newer. It was started with Python %d.%d.%d (%s) and found no newer "
+        "one on PATH." % (NEEDS + tuple(sys.version_info[:3]) + (sys.executable or "path unknown",)),
+        "looked_at": looked_at,
+        "fix": "Install Python %d.%d or newer, or put the one that is installed on PATH, then run the installer again. "
+        "Without Python, the kit can be installed by hand: see docs/manual-installation.md in the "
+        "agent-skills-bridge repository." % NEEDS,
+    }
+    if sys.stdout is not None:  # None where the caller closed it
+        sys.stdout.write(json.dumps(report, indent=2) + "\n")  # in ASCII: this Python may print in any encoding
+    return EXIT_PYTHON
+
+
+if sys.version_info < NEEDS:
+    sys.exit(go_on_with_a_newer_python())
+
+# -- from here on, Python 3.11 or newer -----------------------------------------------------------
 
 import argparse
 import copy
 import hashlib
-import json
-import os
 import shutil
 import stat
-import subprocess
 import tempfile
 from pathlib import Path
 
-EXIT_OK = 0  # installed or already current, and verified
-EXIT_BLOCKED = 1  # something is in the way: nothing in the project was changed
-EXIT_USAGE = 2  # wrong arguments (argparse uses this code)
-EXIT_INCOMPLETE = 3  # the project was changed, but a later step failed
-EXIT_PYTHON = 4  # this interpreter is older than Python 3.11
-
-EXIT_CODES = (
-    "Exit codes: 0 = installed or already current, and verified. "
-    "1 = blocked: nothing in the project was changed; the report's 'blockers' say why. "
-    "2 = wrong arguments. "
-    "3 = the project was changed, but a later step failed; the report's 'problems' say which. "
-    "4 = this interpreter is older than Python 3.11."
-)
+WINDOWS = os.name == "nt"
+# The endings of the programs that Windows starts by itself. PATHEXT names more, such as .VBS.
+STARTABLE = (".com", ".exe", ".bat", ".cmd")
 
 KIT = Path(__file__).resolve().parent.parent / "assets" / "kit"
 
@@ -70,6 +232,8 @@ TOOL_TIMEOUT = 60
 # The bridge's status command starts a few dozen processes. Claude Code gives the session hook the
 # same 120 seconds (see "timeout" in the kit's settings.json).
 STATUS_TIMEOUT = 120
+# How long ending a program that did not answer may take, each step of it.
+STOP_TIMEOUT = 15
 
 
 def lf(data):
@@ -90,31 +254,174 @@ def is_link(path):
 
 
 def locate(name, project=None):
-    """Absolute path of a program on PATH. A copy that lies in the working directory or in the
-    project's top folder is never accepted: the project is input, and on Windows a bare name is
-    looked up in the working directory first."""
-    found = shutil.which(name)
-    if found is None:
-        return None
-    found = os.path.abspath(found)
-    home = os.path.normcase(os.path.dirname(found))
-    for folder in (os.getcwd(), project):
-        if folder is not None and home == os.path.normcase(os.path.abspath(folder)):
-            return None
-    return found
+    """Absolute path of a program on PATH. Only PATH entries that are absolute folders are
+    searched, and never the working directory or the project's top folder: the project is input.
+    shutil.which() does not do for this. On Windows before Python 3.12 it looks into the working
+    directory first, and a file of that name in the project hides the program that PATH has."""
+    avoided = [folder for folder in (os.getcwd(), project) if folder is not None]
+    endings = [""]
+    if WINDOWS:
+        named = [ending for ending in os.environ.get("PATHEXT", "").split(os.pathsep) if ending.lower() in STARTABLE]
+        endings = named or list(STARTABLE)
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        folder = folder.strip('"')
+        if not os.path.isabs(folder) or any(same_folder(folder, input_folder) for input_folder in avoided):
+            continue
+        for ending in endings:
+            found = os.path.join(folder, name + ending)
+            if os.path.isfile(found) and (WINDOWS or os.access(found, os.X_OK)):
+                return os.path.abspath(found)
+    return None
+
+
+class Job:
+    """Windows: a job object for a program and everything it starts. Ending the job ends all of it.
+
+    `taskkill /T` does less: it goes from each process to the ones that name it as their parent,
+    and finds nothing behind a process that has ended. In Git Bash that is the rule: a script's
+    `sleep` or `sed` is started by a copy of the shell that ends at once.
+
+    The program must be in the job before it starts anything, so it is started suspended, put into
+    the job, and only then let run. Git's bin\\bash.exe shows why: it is a small launcher, and it
+    has started the real shell before a job could be made for it."""
+
+    SUSPENDED = 0x00000004  # CREATE_SUSPENDED, which subprocess has no name for
+
+    def __init__(self, process):
+        self.kernel32 = self.handle = None
+        self.let_run = False  # whether the suspended program runs now
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+            kernel32.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+            kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+            kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+            kernel32.TerminateJobObject.restype = wintypes.BOOL
+            kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+            ntdll = ctypes.WinDLL("ntdll")
+            ntdll.NtResumeProcess.restype = ctypes.c_long
+            ntdll.NtResumeProcess.argtypes = (wintypes.HANDLE,)
+            # The rights that the assignment asks for (PROCESS_SET_QUOTA, PROCESS_TERMINATE) and the
+            # right to let the program run (PROCESS_SUSPEND_RESUME).
+            opened = kernel32.OpenProcess(0x0100 | 0x0001 | 0x0800, False, process.pid)
+            if not opened:
+                return
+            try:
+                job = kernel32.CreateJobObjectW(None, None)
+                if job and kernel32.AssignProcessToJobObject(job, opened):
+                    self.kernel32, self.handle = kernel32, job
+                elif job:
+                    kernel32.CloseHandle(job)  # a Windows that refuses the job: stop() uses taskkill
+                self.let_run = ntdll.NtResumeProcess(opened) == 0
+            finally:
+                kernel32.CloseHandle(opened)
+        except Exception:  # no ctypes: run() starts the program again, the plain way
+            pass
+
+    def end(self):
+        """End every program in the job. False when there is no job or Windows refuses."""
+        return self.handle is not None and bool(self.kernel32.TerminateJobObject(self.handle, 1))
+
+    def close(self):
+        """Let go of the job. Programs in it go on running."""
+        if self.handle is not None:
+            self.kernel32.CloseHandle(self.handle)
+            self.handle = None
 
 
 def run(argv, cwd, timeout=TOOL_TIMEOUT, env=None, feed=None):
     """Run a program that cannot prompt: its input is `feed`, or nothing. Returns (exit code or
-    None, stdout, stderr)."""
+    None, stdout, stderr). A program that does not answer in time is ended, and the wait is over
+    soon after `timeout`, whatever the programs do that it has started."""
+
+    def start(flags=0):
+        return subprocess.Popen(
+            argv,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL if feed is None else subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=flags,
+        )
+
+    job = None
     try:
-        source = {"stdin": subprocess.DEVNULL} if feed is None else {"input": feed}
-        done = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, timeout=timeout, **source)
+        if WINDOWS:
+            process = start(Job.SUSPENDED)
+            job = Job(process)
+            if not job.let_run:  # it would stay suspended: end it, and start it without a job
+                job.close()
+                job = None
+                process.kill()
+                process.wait()
+                for pipe in (process.stdin, process.stdout, process.stderr):
+                    if pipe is not None:
+                        pipe.close()
+                process = start()
+        else:
+            process = start()
+    except (OSError, ValueError) as error:
+        return None, "", getattr(error, "strerror", None) or str(error)
+    try:
+        out, err = process.communicate(feed, timeout=timeout)
     except subprocess.TimeoutExpired:
+        stop(process, job)
         return None, "", "no answer within %d seconds" % timeout
-    except OSError as error:
-        return None, "", error.strerror or str(error)
-    return done.returncode, done.stdout.decode("utf-8", "replace"), done.stderr.decode("utf-8", "replace")
+    except BaseException:  # Ctrl-C
+        stop(process, job)
+        raise
+    finally:
+        if job is not None:
+            job.close()
+    return process.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+
+
+def stop(process, job=None):
+    """End a program that did not answer, and wait for nothing beyond STOP_TIMEOUT.
+
+    subprocess.run() does not do for this on Windows: it ends the program and then waits until the
+    last program that holds the pipes has ended. A git or an svn that hangs behind a shell would
+    hold the installer for as long as it hangs. So on Windows everything that the program started
+    is ended with it, through its job, and where there is no job, as far as taskkill finds it.
+
+    Elsewhere only the program itself is ended, as subprocess.run() does it. What it started stays
+    in the installer's own process group: a session that is ended by its group takes all of it
+    along, which a group or a session of the program's own would prevent."""
+    if WINDOWS and not (job is not None and job.end()):
+        taskkill = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe")
+        try:
+            subprocess.run(
+                [taskkill, "/F", "/T", "/PID", str(process.pid)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=STOP_TIMEOUT,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+    try:
+        process.wait(timeout=STOP_TIMEOUT)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    if not WINDOWS:  # on Windows a thread of subprocess may still read from them, and close() would wait for it
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            try:
+                if pipe is not None:
+                    pipe.close()
+            except OSError:
+                pass
 
 
 class Blocked(Exception):
@@ -129,6 +436,13 @@ class Changes:
         self.backups = None  # a folder outside the project, made when the first file is replaced
         self.written = []  # (path, had a file before)
         self.folders = []  # folders this run created
+        self.left = []  # what undo() could not put back
+
+    def backups_shown(self):
+        """The backup folder under the name that other programs find it by, or None when this run
+        replaced no file. A Python from the Microsoft Store keeps what it writes below AppData,
+        the temp folder included, in a place of its own, and only the real path leads there."""
+        return None if self.backups is None else os.path.realpath(self.backups)
 
     def write(self, rel, data):
         target = self.root / rel
@@ -180,6 +494,7 @@ class Changes:
                 pass  # something else is in it by now: it stays
         self.written = []
         self.folders = []
+        self.left += failed
         return failed
 
 
@@ -234,7 +549,7 @@ class Installer:
         self.report["outcome"] = outcome
         self.report["files"] = [{key: entry[key] for key in ("path", "action", "why")} for entry in self.plan]
         if self.changes is not None and self.changes.backups is not None:
-            self.report["backups"] = str(self.changes.backups)
+            self.report["backups"] = self.changes.backups_shown()
         for key in ("vcs_steps", "status_shell", "status", "backups"):  # said only where there is something to say
             if not self.report[key]:
                 del self.report[key]
@@ -575,8 +890,9 @@ class Installer:
     def give_up(self, ident, message, fix):
         left = self.changes.undo()
         if left:
+            kept = self.changes.backups_shown()  # None where every file was new
             self.problem(message)
-            self.problem("These files could not be put back as they were: %s. Their earlier versions are in %s." % ("; ".join(left), self.changes.backups))
+            self.problem("These files could not be put back as they were: %s.%s" % ("; ".join(left), " Their earlier versions are in %s." % kept if kept else ""))
             raise Blocked(False)
         self.block(ident, message + " Everything was put back as it was.", fix)
         raise Blocked(True)
@@ -822,37 +1138,66 @@ def render(report):
     return "{\n" + ",\n".join(parts) + "\n}"
 
 
+class Arguments(argparse.ArgumentParser):
+    """A parser that reports wrong arguments the way the installer reports everything else: as a
+    JSON object on stdout."""
+
+    def error(self, message):
+        print(render({"outcome": "wrong arguments", "message": message, "usage": " ".join(self.format_usage().split()[1:])}))
+        sys.exit(EXIT_USAGE)
+
+
 def main():
     for stream in (sys.stdout, sys.stderr):  # a pipe on Windows is not UTF-8 before Python 3.15
-        stream.reconfigure(encoding="utf-8", errors="replace")
-    parser = argparse.ArgumentParser(
+        if stream is not None:  # a stream that the caller closed
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    parser = Arguments(
         description="Install or update the agent-skills-bridge kit in a project: the hooks that make Claude Code load "
-        "the Agent Skills in .agents/skills. Prints a JSON report on stdout. Never commits and never prompts.",
+        "the Agent Skills in .agents/skills. Prints a JSON report on stdout and nothing on stderr. Never commits and "
+        "never prompts. Started with a Python older than 3.11, it goes on with a newer one from PATH.",
         epilog=EXIT_CODES,
+        allow_abbrev=False,
     )
+    parser.color = False  # Python 3.14 and newer colour the help, even in a pipe where FORCE_COLOR is set
     parser.add_argument("--project", metavar="FOLDER", help="the project's top folder (default: the top folder of the git repository around the working directory, or the working directory itself)")
     parser.add_argument("--dry-run", action="store_true", help="report what would be done, and change nothing")
     parser.add_argument(IGNORE_FLAG, action="store_true", help="when the project's .gitignore ignores the whole .claude folder, rewrite that rule so that git sees the kit; only after the user agreed")
     args = parser.parse_args()
     if args.project is not None and not Path(args.project).is_dir():
-        parser.error("--project: %s is not a folder" % args.project)
+        hint = ""
+        git_bash = re.fullmatch(r"/([A-Za-z])(/.*)?", args.project) if WINDOWS else None
+        if '"' in args.project:
+            # Windows PowerShell 5.1 hands over "C:\my project\" with the closing quote, and the
+            # arguments after it, as part of the path.
+            hint = " The value holds a quotation mark: write the path without a backslash at its end."
+        elif git_bash:
+            # Git Bash turns /c/Users/... into C:/Users/... before it starts a Windows program.
+            # PowerShell and cmd hand the path over as it is.
+            hint = " That is Git Bash's spelling of a path: outside Git Bash, write %s:%s." % (git_bash.group(1).upper(), git_bash.group(2) or "/")
+        parser.error("--project: %s is not a folder.%s" % (args.project, hint))
     os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"  # Windows: do not look for programs in "."
+    started_by = os.environ.pop(STARTED_BY, "")
 
     installer = Installer(args)
+    if re.fullmatch(r"\d+\.\d+\.\d+", started_by):
+        installer.note(
+            "Python %s started the installer, which needs Python %d.%d or newer. It went on with Python %d.%d.%d (%s)."
+            % ((started_by,) + NEEDS + tuple(sys.version_info[:3]) + (sys.executable,))
+        )
     try:
         code = installer.install()
     except Exception as error:  # the report must say what state the project is in, whatever happened
-        left = installer.changes.undo() if installer.changes is not None and installer.changes.written else []
+        if installer.changes is not None and installer.changes.written:
+            installer.changes.undo()
+        left = installer.changes.left if installer.changes is not None else []  # also from an undo before the failure
         message = "The installer failed: %s: %s." % (type(error).__name__, error)
-        if installer.changes is not None and (left or installer.report["vcs_steps"]):
+        if left or installer.report.get("vcs_steps"):
             installer.problem(message + " The project may be changed in part.")
             code = installer.finish("incomplete", EXIT_INCOMPLETE)
         else:
             installer.block("installer-failed", message + " Nothing in the project was changed.", "Report this to the kit's maintainer.")
             code = installer.finish("blocked", EXIT_BLOCKED)
     print(render(installer.report))
-    summary = {EXIT_OK: "done", EXIT_BLOCKED: "blocked, nothing was changed", EXIT_INCOMPLETE: "INCOMPLETE, see 'problems'"}[code]
-    print("agent-skills-bridge installer: %s (%s)" % (summary, installer.report["outcome"]), file=sys.stderr)
     return code
 
 

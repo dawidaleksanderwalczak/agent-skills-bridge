@@ -21,7 +21,8 @@ to `.claude/skills`, keep the copies current during a session, and stop Claude f
 ## Requirements
 
 - Claude Code 2.1.220 or newer, desktop app or CLI
-- Python 3.11 or newer on PATH, for the installer only
+- Python 3.11 or newer on PATH, for the installer only. Any name will do: `python3`, `python`, `py`
+  or a versioned one such as `python3.12`
 - Windows (Git Bash or PowerShell), macOS or Linux; git or svn
 
 ## Install

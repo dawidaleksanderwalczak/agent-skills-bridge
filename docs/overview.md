@@ -269,8 +269,16 @@ takes the kit from the skill's own `assets/kit` folder and:
    runs `status` in the shell that Claude Code will run the hooks in.
 
 A write that fails, or a check that fails, puts every file back. The installer never commits. Its
-exit code is the verdict: 0 for installed and verified, 1 for blocked with nothing changed, 3 for
-changed but not complete. The skill lets the agent call the bridge installed on 0 only.
+answer is one JSON object on stdout, the report, and nothing on stderr. The report's `outcome` is
+the verdict, and the exit code says the same: `installed` or `current` (0), `blocked` with nothing
+changed (1), `wrong arguments` (2), `incomplete` for changed but not complete (3), and
+`python too old` (4). The skill lets the agent call the bridge installed on `installed` and
+`current` only.
+
+The installer needs Python 3.11 or newer, and `python3` is older than that on many machines that
+have a newer Python under another name. Started with an older one, the installer therefore looks
+on PATH for a newer one and goes on with it. Section 8, "Portability review of the installer",
+says how.
 
 The steps by hand follow. They are what the installer does.
 
@@ -944,6 +952,74 @@ installed the kit in a new repository. A headless session listed the plugin's co
 [testing.md](testing.md) has the table. What is still missing is the same as before: a live session
 in which a user types the command.
 
+### Portability review of the installer (27 November 2026)
+
+A review against the question "Windows, macOS and Linux; Git Bash, bash and PowerShell; every
+Python from 3.11 on" found the problems below. All are fixed. Where the table says "checked", the
+problem was reproduced first: on Windows 11 with Python 3.10, 3.11 and 3.14, in Git Bash and in
+Windows PowerShell 5.1, and in WSL with Python 3.12.
+
+| Finding | Fix |
+|---|---|
+| Windows PowerShell 5.1: the installer closed every run with a line on stderr, a successful one too. Once stderr is redirected (`2>&1`), PowerShell 5.1 makes an error of each such line, and under `$ErrorActionPreference = 'Stop'` it ends the command there with exit code 1. A successful installation was reported as failed (checked). Exit code 3 would have arrived as 1, which the skill read as "nothing was changed". | The installer writes nothing to stderr. Wrong arguments and a Python that is too old come as a report on stdout as well, and the skill goes by the report's `outcome`. |
+| Windows: a time limit did not limit the wait. Python ends only the program it started, and then waits until the last program that holds the pipes has ended. A program with a limit of 3 seconds that had started a second one came back after 25 seconds, when the second one ended by itself (checked with Python 3.11 and 3.14). On Linux it came back after 3.0 seconds. A `git` or `svn` that hangs behind the shell of the bridge's `status` would have held the installer for as long as it hung. | On Windows a program that does not answer is ended together with everything it started: it is started suspended, put into a job object and then let run, and ending the job ends all of it. The installer then waits for nothing else. Outside Windows nothing had to change: the installer ends the program and comes back, as before. |
+| Windows, Python 3.11: a file with the name of a program in the project hid the program on PATH. Before Python 3.12, `shutil.which` looks into the working directory first. With a `git.cmd` in the project, the installer said that no git is on PATH and left out its checks with git, under Python 3.11 and not under 3.14 (checked). | The installer goes through PATH itself: absolute folders only, never the project or the working directory, and on to the next folder where one is left out. |
+| The project and the working directory were known by their spelling. PATH can name the same folder through a link, in another letter case or by a short name, and a `git` or a `python3.12` in it would have been started (checked with a link, on Windows and on Linux). | The file system is asked whether two paths are one folder. |
+| A `python3` older than 3.11 ended the run with exit code 4, also where a newer Python was on PATH under another name. That is a usual state: Apple's command line tools install Python 3.9.6 as `python3`, Ubuntu 22.04 has 3.10, and RHEL 9 has 3.9 with `python3.11` and `python3.12` as packages. The skill tried `python3`, `python` and `py -3`, and no versioned name. | Started with an older Python, the installer looks on PATH for a newer one: `python3.<n>` from the highest `n` down, then `python3`, `python`, and the `py` launcher on Windows. It goes on with the first that is new enough, and a note in the report says so. A final release comes before a pre-release. |
+| A name on PATH need not start a Python that fits. On the test machine, the first `python3.11` on PATH is a wrapper whose Python is gone (checked). Windows puts placeholders named `python` and `python3` on PATH that only offer the Store. And a Python of MSYS2 or Cygwin on a Windows PATH reads `C:\Users` as a relative path (not run: no such Python was at hand). | Each candidate is asked for its version and the system it is built for. One that does not start, does not answer in time, is too old or is built for another system is passed over. Only PATH entries that are absolute folders are searched, and never the working directory or the project, which are input. |
+| The skill read the exit code of whatever stood in for Python as the installer's. That wrapper ends with 1 and prints no report (checked), and the skill's table read 1 as "blocked, nothing was changed". Python 2 ends with 2 at the option `-I`, which the table read as "wrong arguments" (not run: no Python 2 was at hand). | The skill goes by the report. No report means that the installer did not run, and the next name is tried. |
+| Windows PowerShell 5.1 hands `--project "C:\my project\"` over as `C:\my project" --dry-run`: the closing quote and the arguments behind it become part of the path. The installer said that this is no folder, and no more (checked). | The message names the quotation mark and what to change, and the skill asks for paths without a slash or backslash at the end. A `--dry-run` that the path swallowed never turns into an installation. |
+| A project in Git Bash's spelling, `/c/Users/...`, is no folder for a Windows Python that PowerShell or cmd started: only Git Bash rewrites such a path on the way (checked). The installer said that this is no folder, and no more. | The message says whose spelling it is and names the Windows one. |
+| Python 3.14 colours the help and the usage line where `FORCE_COLOR` is set, in a pipe too (checked). | The colours are off. |
+| A Python from the Microsoft Store keeps what it writes below `AppData`, the temp folder included, in a place of its own. The report then named the backup folder by a path that no other program finds. Not reproduced: no such Python was at hand. | The report names the folder by its real path, which is what the Python documentation recommends for this. |
+
+- **Why the installer looks for the Python itself.** There were two other ways. One was to name
+  more commands in the skill: an agent would then start one line after another until one works.
+  The other was to have the installer name the Python it found and leave the second start to the
+  agent. That needs the Python's full path on the command line, and a path with a space is called
+  with `&` in PowerShell and without it in bash, so the line would no longer read the same in
+  both. The search costs nothing where `python3` is new enough: it runs only in a Python that is
+  too old.
+- **What an older Python runs.** The part of the script up to the version check keeps to what
+  Python 3.6 knows, and the whole file keeps to syntax that such a Python reads. A test reads the
+  file as Python 3.7, the oldest that the test's own Python can check. A Python before 3.5 cannot
+  read the file, and Python 2 does not know the option `-I`: both print no report, so the skill
+  tries the next name.
+- **What stays as it was.** The report is UTF-8, with letters outside ASCII as they are. Git Bash
+  and Claude Code's PowerShell tool show them right (checked with a project folder named in such
+  letters). The `--project` path arrives right in Git Bash as `/c/...`, as `C:\...` in quotes and
+  as a path below `/tmp`.
+- **Why the job, and why only on Windows.** The first fix ended a program's children with
+  `taskkill /T`. That goes from each process to the ones that name it as their parent, and finds
+  nothing behind a process that has ended. In Git Bash that is the rule: Git's `bin\bash.exe` is
+  a launcher for the real shell, and a script's `sleep` or `sed` is started by a copy of the shell
+  that ends at once. With a time limit of 5 seconds, the installer came back after 20 and left the
+  `sleep` running (checked). A job object holds whatever a program starts. The program must be in
+  it before it starts anything, so it is started suspended: without that, the launcher had started
+  the real shell before the job was there (checked). Outside Windows, the same would need a
+  process group or a session of the program's own. Then a session that is ended by its process
+  group, which is how some tools end a command that takes too long, would leave those programs
+  behind, where today they go with the installer. So there the installer ends the program it
+  started and leaves the rest in its own group, as it always did.
+- **A second reader** went through the change before it was committed. Its findings were
+  reproduced before they were accepted, all but the Python of another system, for which there
+  was none to try. The job and the two findings about folders come from there as well. So does
+  one defect that the change itself had brought in: where a write failed and a file that the run
+  had made could not be removed again, a first installation ended as "blocked, nothing was
+  changed". It ends as incomplete now, and a test holds that.
+- **The tests.** The review added 20 tests and changed one. Run against the installer as it was,
+  19 of these 21 fail on Windows and 13 in WSL, and so does every older test that starts the
+  installer, because each run now has to leave stderr empty. [testing.md](testing.md) says what
+  they cover.
+- **The skill's new text** was tried on two fresh agents, as the first text was: a Haiku model in
+  Windows PowerShell 5.1 and a Sonnet model in Git Bash. The first went by the report's outcome,
+  because its shell showed no exit code for a success. The second stopped at `blocked` and asked.
+
+Two limits remain. A machine whose only Python is older than 3.11 cannot run the installer: a Mac
+with nothing but the Python of Apple's command line tools is one. The report then says
+`python too old` and names the installation by hand. And the review ran on Windows and Linux: no
+Mac was at hand, and no Python from 3.6 to 3.9 (see "Not run yet" in [testing.md](testing.md)).
+
 ### cmd.exe check (25 November 2026)
 
 A follow-up question was whether the kit also works for people who use cmd. The Claude Code program
@@ -993,6 +1069,8 @@ Write and NotebookEdit, without a filter.
   outputs were dry-run on Windows, with the hooks run the way Claude Code runs them. The steps on
   the Claude side rest on the earlier live checks and on the Claude Code program.
 - A run on macOS, and bash 3.2 itself. The official `bash:3.2` container image would allow the latter.
+- The installer on macOS, started by a Python from 3.6 to 3.9, and with a Python from the Microsoft
+  Store: see "Not run yet" in [testing.md](testing.md).
 - PowerShell 7. The test machine has none; `ASB_TEST_POWERSHELL=pwsh.exe` runs the suite with one.
 - A sync inside a OneDrive folder. The link test of the PowerShell twin was checked against the
   entries of a OneDrive folder, but nothing was copied there.
@@ -1025,6 +1103,7 @@ Write and NotebookEdit, without a filter.
 | A Group Policy enforces `AllSigned` for PowerShell | On Windows without Git Bash, the `.ps1` doesn't run. | Install Git for Windows (hooks then run in Git Bash), or sign the script. |
 | svn: `svn:ignore *` also hides a new Claude-only skill folder | Someone must add it by name. | Documented. Files inside an added skill folder behave normally. |
 | The installer writes an existing `settings.json` anew to add the hooks | A file that was laid out by hand loses that layout. A file with comments is not valid JSON, and the installer does not touch it. | The installer keeps indentation, line endings and the order of the keys, says when the layout changes, and keeps the file as it was in a folder outside the project. At a file it cannot read, it stops and names the kit's `settings.json` to merge by hand. |
+| The installer needs Python 3.11 or newer | A machine whose only Python is older cannot run it. A Mac with nothing but the Python of Apple's command line tools, 3.9.6, is one. | The report says `python too old` and names the way out: a newer Python on PATH under any name, or the installation by hand ([manual-installation.md](manual-installation.md)). Teammates need no Python at all. |
 | Claude Code does not update a plugin from a marketplace like this one by itself | A machine keeps installing the kit it has until its user updates the plugin. | The README says how to update. The installer's report names the kit's version, and a second run with a newer plugin replaces what changed. |
 | Each Write or NotebookEdit call starts the guard | A small delay per call. It is noticeable only on machines with slow process starts. | The guard exits at once outside `.claude/skills`. Claude Code's `if` filter can't help for these tools. |
 | The file watcher can't see changes, for example in WSL on `/mnt/c` | Changes made outside Claude arrive at the next session start. | Start a new session, or run `sync` and `/reload-skills`. |
