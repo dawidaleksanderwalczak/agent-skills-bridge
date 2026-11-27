@@ -186,9 +186,11 @@ python3 tests/test_install_bridge.py        # Windows: py -3.11 tests\test_insta
 ```
 
 The tests need Python 3.11 or newer and git. They start the installer the way the skill does, as a
-program of its own, and look at its exit code, its report and what it left on disk. git reads no
-configuration of the user's while they run, and the installer's backups go to the tests' own temp
-folder. They cover:
+program of its own, and look at its exit code, its report and what it left on disk. Every run
+must leave stderr empty. A few of its functions are also loaded and called by themselves: the
+search for another Python on PATH, and the runner for git, svn and the bridge's `status`. git
+reads no configuration of the user's while the tests run, and the installer's backups go to the
+tests' own temp folder. They cover:
 
 - **the plugin:** the marketplace file and the plugin's manifest (the same name in both, a source
   path that leads to the plugin folder, what users see, no version, no mail address), the files
@@ -220,16 +222,53 @@ folder. They cover:
 - **the installed kit at work:** the session hook and both guard entries from the installed
   `settings.json`, run in the shell that Claude Code uses and in Windows PowerShell, and what the
   bridge's `status` finds wrong turning up in the report's notes;
-- **an interpreter older than Python 3.11,** which gets its own exit code.
+- **the command line:** wrong arguments, which come as a report like everything else; the
+  quotation mark that Windows PowerShell 5.1 leaves in a path that ends with a backslash; a
+  project in Git Bash's spelling, `/c/Users/...`, outside Git Bash; a slash at the end of the
+  project's path; the help, which must hold no colour codes where Python 3.14 is told to force
+  them; and a run in Windows PowerShell 5.1 with `2>&1` and `$ErrorActionPreference = 'Stop'`,
+  which must see the success;
+- **a Python older than 3.11:** the file must read as Python 3.7; the Pythons on PATH come best
+  first, and a folder that is input is never searched; a name that starts nothing is passed over,
+  and so is a Python that is built for another system; the installer goes on with a newer Python
+  and says so in a note; without a newer one it says so, with exit code 4, and changes nothing;
+  and it takes no Python from the project or the working directory, also where PATH names them
+  through a link. Where the machine has an older Python, the oldest one starts the installer.
+  Where it has none, outside Windows, the Python that runs the tests plays it: it is told that it
+  is Python 3.9 before the installer starts, and what it then finds on PATH and starts is real;
+- **a program that hangs:** one that does not answer and has started a second one, which holds
+  the same pipes, and one that has ended and left such a second one behind. The wait must end
+  with the time limit. On Windows the second one must be gone too, also where it is the `sleep`
+  of a script in Git Bash, which no parent leads to, and the program must still run and be ended
+  on a Windows that gives the installer no job;
+- **where git, svn and the shells are looked for:** a program of that name in the project is not
+  taken and hides nothing, whether PATH names the project as it is, through a link, or by an
+  entry that counts from the working directory;
+- **a run that cannot put its files back:** it ends as incomplete, also where every file was new
+  and no earlier version was kept.
 
-Results on 27 November 2026, with the skill in the plugin folder:
+Results on 27 November 2026, after the portability review of the installer
+([overview.md](overview.md), section 8):
 
 | System | Python | Result |
 |---|---|---|
-| Windows 11, git 2.54, svn from TortoiseSVN, Claude Code 2.1.332 | 3.11.9 | 59/59 |
-| Ubuntu 24.04 (WSL), git 2.43, svn 1.14 | 3.12.3 | 56 passed, 3 skipped: the Windows PowerShell case, no older Python and no `claude` command there |
+| Windows 11, git 2.54, svn from TortoiseSVN, Claude Code 2.1.332, Windows PowerShell 5.1, Git Bash | 3.11.9 | 78/78; the older Python is 3.10.20 |
+| The same | 3.14.5 | 78/78 |
+| Ubuntu 24.04 (WSL), git 2.43, svn 1.14 | 3.12.3 | 72 passed, 6 skipped: the five cases that are about Windows, and no `claude` command there. Python 3.12 plays the older Python |
+| The same, as root | 3.12.3 | 71 passed, 7 skipped: those six, and the file that cannot be written, which root can write |
 
-The day before, without the eight plugin tests, the counts were 51/51 and 49 passed with 2 skipped.
+Before that review, the same day, the counts were 59/59 on Windows with both Pythons, and 56
+passed with 3 skipped in WSL. The day before, without the eight plugin tests, they were 51/51 and
+49 passed with 2 skipped.
+
+The review added 20 tests, which take the place of one older test, and changed one more. Run
+against the installer as it was before the review, 19 of these 21 fail on Windows. In WSL 13
+fail: four cases that are about Windows are skipped there, and the two about a program that
+hangs pass, because outside Windows that installer came back in time. The older tests fail
+against it as well, for one reason: every run now has to leave stderr empty, and that installer
+closed each run with a line on stderr. On Windows each of the three tests for a program that
+hangs takes two minutes against that installer, which is the wait that the review had to end:
+the installer came back after 120 seconds from a program with a time limit of 10.
 
 ### The plugin in Claude Code
 
@@ -265,6 +304,18 @@ agents then used the folder of `SKILL.md`, as the skill says. Both asked what to
 `status` lines of the report. Since then the installer turns what matters in them into notes, and
 the skill says so.
 
+The portability review of 27 November 2026 rewrote steps 1 and 2 of the skill, so both trials were
+repeated that day with the new text, one in each shell, in projects like the two above.
+
+| Model | Shell | What the agent did |
+|---|---|---|
+| Claude Haiku | Windows PowerShell 5.1; the project's path has two spaces | Ran the installer once. Its shell tool shows no exit code for a success, so the agent went by the report's outcome, `installed`. It reported each file and the next steps, and committed nothing. |
+| Claude Sonnet | Git Bash | Ran the installer once, got exit code 1 with the outcome `blocked`, stopped, and asked whether the rule may be rewritten. It did not add the flag by itself. |
+
+Each agent ran the one command line as the skill writes it, with nothing behind it. What they left
+on disk was looked at afterwards: in the first project the kit is installed, the own settings are
+kept and nothing is committed, and the second project is untouched.
+
 Not run yet:
 
 - **The skill in a live Claude Code session.** The headless sessions above list the plugin's
@@ -275,5 +326,19 @@ Not run yet:
   install from `dawidaleksanderwalczak/agent-skills-bridge` works once the plugin is on the default
   branch there.
 - **The plugin browser of the desktop app.** The plugin was installed with the `claude` command only.
-- **The installer on macOS.** It uses nothing that Linux does not have.
+- **The installer on macOS.** It uses nothing that Linux does not have. Apple's command line tools
+  install Python 3.9.6 as `python3`. On a Mac with a newer Python on PATH as well, from Homebrew
+  for example, the installer has to go on with that one, which the tests check on Linux and
+  Windows. On a Mac without one, it has to answer `python too old`.
+- **A Python from 3.6 to 3.9 as the one that starts the installer.** The part of the script that
+  such a Python runs keeps to what Python 3.6 knows. It ran with Python 3.10 on Windows, and on
+  Linux with a Python 3.12 that was told it is 3.9. No interpreter that old was at hand.
+- **Python 3.13, and Python 3.12 on Windows.** The installer ran with 3.11 and 3.14 on Windows and
+  with 3.12 on Linux.
+- **A Python from the Microsoft Store.** It keeps what it writes below `AppData`, the temp folder
+  included, in a place of its own. For that reason the report names the backup folder by its real
+  path, as the Python documentation recommends. No such Python was at hand to try it.
+- **PowerShell 7 as the shell that starts the installer.** This machine has no `pwsh`, so the two
+  cases that came from Windows PowerShell 5.1, the redirected stderr and the path that ends with
+  a backslash, were not tried there.
 - **Codex and ChatGPT** with `agents/openai.yaml`.

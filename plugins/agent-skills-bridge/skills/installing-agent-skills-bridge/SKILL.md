@@ -12,18 +12,19 @@ description: >-
   bridge.
 license: MIT
 compatibility: >-
-  Requires Python 3.11 or newer on PATH (standard library only; no network
-  access and no package installation). The installed kit needs Claude Code
-  2.1.220 or newer. Uses git and svn where the project does.
+  Requires Python 3.11 or newer on PATH, under any of the names python3,
+  python, py or python3.x (standard library only; no network access and no
+  package installation). The installed kit needs Claude Code 2.1.220 or
+  newer. Uses git and svn where the project does.
 disable-model-invocation: true
 argument-hint: "[project folder]"
 ---
 
 # Installing the agent-skills-bridge
 
-The bundled installer does the whole installation and checks its own work. You run it, act on its
-exit code and relay its report. **Run the script; do not read it, and never copy or edit the kit's
-files by hand.** It is a deterministic installer, not reference material.
+The bundled installer does the whole installation and checks its own work. You run it, act on the
+outcome it reports and relay its report. **Run the script; do not read it, and never copy or edit
+the kit's files by hand.** It is a deterministic installer, not reference material.
 
 - `<skill>` is the folder that holds this file. Claude Code fills it in here:
   `${CLAUDE_SKILL_DIR}`. If that still reads as a name with a dollar sign, your tool did not fill
@@ -39,32 +40,45 @@ project's `.claude/settings.json`.
 
 ## 1. Run the installer
 
-One command, on one line, flags included. It reads the same in bash and in PowerShell:
+One command, on one line, flags included. It reads the same in bash, zsh and PowerShell:
 
 ```
 python3 -I -S "<skill>/scripts/install_bridge.py" --project "<project>"
 ```
 
-- **Interpreter.** The script needs Python 3.11 or newer and nothing else. If `python3` does not
-  start it, or it exits with 4 (interpreter too old), run the same line with `python`, then with
-  `py -3`. If none of the three works, stop and tell the user that the installer needs
-  Python 3.11 or newer. Do not install an interpreter.
+Write both paths without a slash or backslash at the end, and put nothing behind the line: no
+pipe and no redirection.
+
+The installer answers with one JSON object on stdout, the report, and writes nothing to stderr.
+
+- **No report.** Then the installer did not run, whatever the exit code and the message say: the
+  shell found no `python3`, or that name starts a placeholder that only offers to install Python,
+  or a Python too old to read the script. Run the same line with `python` in place of `python3`,
+  then with `py -3`. If none of the three prints a report, stop and tell the user that the
+  installer needs Python 3.11 or newer on PATH. Do not install an interpreter.
+- **An older Python.** The installer needs Python 3.11 or newer and nothing else. Started with an
+  older one, it looks on PATH for a newer one, `python3.12` for example, and goes on with that by
+  itself. A note in the report then says so, and you run nothing for it.
 - **Plan first.** If the user wants to see what would happen, add `--dry-run`. It reports and
   changes nothing.
 
-The report is one JSON object on stdout.
+## 2. Act on the outcome
 
-## 2. Act on the exit code
+The report's `outcome` and the exit code say the same thing. If they differ, because a shell
+changed the exit code, go by the `outcome`.
 
-| Exit | Meaning | What you do |
-|---|---|---|
-| 0 | Installed, or already current, and verified | Report (step 3). |
-| 1 | Blocked. Nothing in the project was changed | Give the user the `message` and the `fix` of each entry in `blockers`, and ask whether to apply the fix. Change nothing in the project to get past a blocker without their yes. On a yes, apply it (`rerun_with`, where an entry has it, is the installer flag that does so) and run step 1 again. Without an answer, stop here. |
-| 2 | Wrong arguments | Correct the command line. |
-| 3 | The project was changed, but a later step failed | Give the user every entry in `problems`, and the `backups` folder if the report names one. |
+| `outcome` | Exit | Meaning | What you do |
+|---|---|---|---|
+| `installed`, `current` | 0 | Installed, or already current, and verified | Report (step 3). |
+| `would change` | 0 | A dry run found something to do | Report (step 3). Nothing is installed yet. |
+| `blocked` | 1 | Nothing in the project was changed | Give the user the `message` and the `fix` of each entry in `blockers`, and ask whether to apply the fix. Change nothing in the project to get past a blocker without their yes. On a yes, apply it (`rerun_with`, where an entry has it, is the installer flag that does so) and run step 1 again. Without an answer, stop here. |
+| `wrong arguments` | 2 | The command line is wrong | Correct it: `message` says what is wrong. |
+| `incomplete` | 3 | The project was changed, but a later step failed | Give the user every entry in `problems`, and the `backups` folder if the report names one. |
+| `python too old` | 4 | No Python 3.11 or newer is on PATH | Stop. Give the user the `message` and the `fix`. Do not install an interpreter. |
 
-Run the installer at most three times for one request. If it has not exited with 0 by then, stop
-and show the user the last report. Call the bridge installed only after an exit code of 0.
+Run the installer at most three times for one request; a line that printed no report does not
+count. If the outcome is not `installed` or `current` by then, stop and show the user the last
+report. Call the bridge installed only after one of these two outcomes.
 
 ## 3. Report
 
