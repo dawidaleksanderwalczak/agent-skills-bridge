@@ -1,6 +1,6 @@
 # Installing the kit by hand
 
-The [installer skill](../README.md#add-the-kit-to-a-project) does all of this, and checks more than
+The [installer skill](../README.md#install) does all of this, and checks more than
 a person would. Use this page on a machine without Python 3.11.
 
 The kit's files are in `plugins/agent-skills-bridge/skills/installing-agent-skills-bridge/assets/kit` of this repository. That
@@ -54,7 +54,7 @@ describes every case in its sections "Adopt it in a git repository", "Adopt it n
    ```
 
 4. Put your skills in `.agents/skills/<name>/SKILL.md` if they aren't there yet, commit them, and
-   [check that it works](../README.md#check-that-it-works).
+   [check that it works](../README.md#use).
 
 ## svn
 

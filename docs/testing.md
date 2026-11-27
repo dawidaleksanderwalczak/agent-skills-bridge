@@ -235,7 +235,7 @@ The day before, without the eight plugin tests, the counts were 51/51 and 49 pas
 
 `claude plugin validate .` is Claude Code's own check of the marketplace file, the plugin's manifest
 and the skill. It reports one warning here, "No version specified". That is intended: without a
-version, Claude Code takes the commit as the plugin's version (see "Versions" in the README).
+version, Claude Code takes the commit as the plugin's version (see "Update" in the README).
 
 On 27 November 2026 the plugin was also installed with Claude Code 2.1.332 on Windows 11. Every
 command ran with `CLAUDE_CONFIG_DIR` set to a scratch folder, so the machine's own Claude settings
