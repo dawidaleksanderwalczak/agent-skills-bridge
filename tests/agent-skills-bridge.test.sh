@@ -1,12 +1,15 @@
 #!/bin/sh
 # agent-skills-bridge.test.sh - scenario tests for the agent-skills bridge.
 #
-# Usage: sh .claude/hooks/agent-skills-bridge.test.sh [sh|ps1]
+# Usage: sh tests/agent-skills-bridge.test.sh [sh|ps1]
 #   sh   test agent-skills-bridge.sh (default; any POSIX sh, Git Bash included)
 #   ps1  test agent-skills-bridge.ps1 through Windows PowerShell (run from Git Bash on Windows)
 # ASB_TEST_SHELL names the shell that runs the hook commands of the sh bridge (default: sh), for
 # example ASB_TEST_SHELL=zsh. ASB_TEST_POWERSHELL names the PowerShell for ps1 (default:
-# powershell.exe), for example ASB_TEST_POWERSHELL=pwsh.exe.
+# powershell.exe), for example ASB_TEST_POWERSHELL=pwsh.exe. ASB_TEST_KIT names the kit under test
+# (default: the installer skill's assets/kit next to this folder): a folder that holds
+# hooks/agent-skills-bridge.sh and .ps1, and for the checks of the kit's own files also
+# settings.json, hooks/.gitattributes and skills/.gitignore.
 # Builds throwaway repositories under $TMPDIR and checks what the bridge leaves on disk. The git
 # cases run where git is installed, the svn cases where svn and svnadmin are.
 
@@ -15,6 +18,7 @@ impl=${1:-sh}
 hook_shell=${ASB_TEST_SHELL:-sh}
 powershell=${ASB_TEST_POWERSHELL:-powershell.exe}
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+kit=$(CDPATH='' cd -- "${ASB_TEST_KIT:-$here/../plugins/agent-skills-bridge/skills/installing-agent-skills-bridge/assets/kit}" && pwd) || exit 1
 base=$(mktemp -d "${TMPDIR:-/tmp}/agent-skills-bridge-test.XXXXXX")
 blocker=
 # After a signal too: dash and BusyBox ash run an EXIT trap only when the shell exits by itself.
@@ -91,7 +95,7 @@ skill() { # skill <repo> <name> [body]
 new_repo() {
   r=$base/$1
   mkdir -p "$r/.claude/hooks"
-  cp "$here/agent-skills-bridge.sh" "$here/agent-skills-bridge.ps1" "$r/.claude/hooks/" 2> /dev/null
+  cp "$kit/hooks/agent-skills-bridge.sh" "$kit/hooks/agent-skills-bridge.ps1" "$r/.claude/hooks/" 2> /dev/null
   printf '%s' "$r"
 }
 
@@ -142,7 +146,7 @@ meanwhile() {
   awk -v text="$2" -v code="$code" '{ print } index($0, text) { print code }' "$f" > "$f.new" &&
     mv -f "$f.new" "$f"
 }
-pristine() { cp "$here/agent-skills-bridge.sh" "$here/agent-skills-bridge.ps1" "$1/.claude/hooks/"; }
+pristine() { cp "$kit/hooks/agent-skills-bridge.sh" "$kit/hooks/agent-skills-bridge.ps1" "$1/.claude/hooks/"; }
 
 # settled <description> <repo>: after a hook has dealt with something once, the next hook must find
 # nothing left to do. It must give the answer of a hook that has every program at hand, and start
@@ -162,7 +166,7 @@ settled() {
 
 if [ "$impl" = ps1 ]; then echo "agent-skills bridge tests (ps1 in $powershell)"; else echo "agent-skills bridge tests (sh, hooks in $hook_shell)"; fi
 
-settings=$here/../settings.json
+settings=$kit/settings.json
 if [ -f "$settings" ]; then
   echo "0. the kit's own files"
   for c in session sync guard; do
@@ -192,8 +196,8 @@ if [ -f "$settings" ]; then
       if (!guarded["Edit"] || !guarded["MultiEdit"] || !guarded["Write"] || !guarded["NotebookEdit"]) bad = 1
       exit bad
     }' "$settings"
-  check ".gitattributes keeps the shell scripts LF" grep -qx '\*\.sh text eol=lf' "$here/.gitattributes"
-  check "the anchor ignores nothing" sh -c "! grep -v '^#' '$here/../skills/.gitignore' | grep -q ."
+  check ".gitattributes keeps the shell scripts LF" grep -qx '\*\.sh text eol=lf' "$kit/hooks/.gitattributes"
+  check "the anchor ignores nothing" sh -c "! grep -v '^#' '$kit/skills/.gitignore' | grep -q ."
 fi
 
 echo "1. first sync"
@@ -617,7 +621,7 @@ if command -v git > /dev/null 2>&1; then
   # The kit in a clone that turns LF into CRLF (core.autocrlf=true, the Git for Windows default).
   git -c core.autocrlf=true clone -q "$G" "$base/clone-crlf" 2> /dev/null
   check "control: without .gitattributes an autocrlf clone gets CRLF" test "$(crs "$base/clone-crlf/.claude/hooks/agent-skills-bridge.sh")" -gt 0
-  cp "$here/.gitattributes" "$G/.claude/hooks/.gitattributes"
+  cp "$kit/hooks/.gitattributes" "$G/.claude/hooks/.gitattributes"
   gq add .claude/hooks/.gitattributes
   gq commit -qm 'keep the shell scripts LF'
   git -c core.autocrlf=true clone -q "$G" "$base/clone-lf" 2> /dev/null
@@ -640,7 +644,7 @@ if command -v svn > /dev/null 2>&1 && command -v svnadmin > /dev/null 2>&1; then
   svn checkout -q "$url" "$V/wc"
   C=$V/wc
   mkdir -p "$C/.claude/hooks"
-  cp "$here/agent-skills-bridge.sh" "$here/agent-skills-bridge.ps1" "$C/.claude/hooks/"
+  cp "$kit/hooks/agent-skills-bridge.sh" "$kit/hooks/agent-skills-bridge.ps1" "$C/.claude/hooks/"
   skill "$C" alpha
   svn add -q "$C/.claude" "$C/.agents"
   svn mkdir -q "$C/.claude/skills"

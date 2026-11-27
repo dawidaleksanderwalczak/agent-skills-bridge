@@ -1,0 +1,4 @@
+# Codex and ChatGPT: run this skill only when the user names it. Claude Code reads
+# disable-model-invocation in SKILL.md for the same purpose.
+policy:
+  allow_implicit_invocation: false
