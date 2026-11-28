@@ -105,5 +105,4 @@ Claude Code takes the commit as its version, so an update always brings the newe
 |---|---|
 | [docs/overview.md](docs/overview.md) | Design, safety properties, support matrix, alternatives, risks |
 | [docs/manual-installation.md](docs/manual-installation.md) | Installation by hand, for a machine without Python |
-| [docs/testing.md](docs/testing.md) | What the tests cover, where they passed, and how to run them |
 | `.claude/hooks/agent-skills-bridge.md`, in an installed project | Everyday use, svn, worktrees, manual test, troubleshooting |
