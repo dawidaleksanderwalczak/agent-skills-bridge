@@ -13,9 +13,11 @@ Without a bridge, teams must manage synchronization themselves, whether through 
 
 The plugin automatically synchronizes skills from `.agents/skills` into `.claude/skills`, keeping the generated copies up to date, read-only and excluded from version control. The `.agents/skills` directory remains the single source of truth.
 
-Under the hood, the plugin installs three Claude Code hooks that handle initial synchronization, keep skill copies current throughout a session, and prevent Claude Code from modifying the generated copies.
+Technically, the plugin installs three Claude Code hooks that copy skills into `.claude/skills`, synchronize changes made to the source skills, and prevent Claude Code from modifying the generated copies.
 
-| | Source, committed | Copy, generated | In Claude Code |
+The table below shows how a skill path in `.agents/skills` maps to its generated mirror and slash command in Claude Code.
+
+| | Source directory (committed) | Generated directory | Claude Code command |
 |---|---|---|---|
 | Generic | `.agents/skills/<name>/SKILL.md` | `.claude/skills/<name>/SKILL.md` | `/<name>` |
 | Example | `.agents/skills/deploying-to-staging/SKILL.md` | `.claude/skills/deploying-to-staging/SKILL.md` | `/deploying-to-staging` |
