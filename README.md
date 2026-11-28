@@ -2,7 +2,7 @@
 
 A Claude Code plugin that makes Claude Code load the Agent Skills in `.agents/skills`.
 
-## Why
+## The Problem: Claude Code Ignores .agents/skills
 
 Codex, GitHub Copilot, Cursor, JetBrains Junie and OpenCode read a project's skills from
 `.agents/skills`. **Claude Code does not**: it reads only `.claude/skills`
@@ -18,14 +18,14 @@ to `.claude/skills`, keep the copies current during a session, and stop Claude f
 | Generic | `.agents/skills/<name>/SKILL.md` | `.claude/skills/<name>/SKILL.md` | `/<name>` |
 | Example | `.agents/skills/deploying-to-staging/SKILL.md` | `.claude/skills/deploying-to-staging/SKILL.md` | `/deploying-to-staging` |
 
-## Requirements
+## Technical Requirements for Plugin Usage
 
 - Claude Code 2.1.220 or newer, desktop app or CLI
 - Python 3.11 or newer on PATH, for the installer only. Any name will do: `python3`, `python`, `py`
   or a versioned one such as `python3.12`
 - Windows (Git Bash or PowerShell), macOS or Linux; git or svn
 
-## Install
+## How to Install the Bridge
 
 1. **Add the plugin, once per machine.** In a Claude Code session, 2.1.275 or newer:
 
@@ -55,7 +55,7 @@ to `.claude/skills`, keep the copies current during a session, and stop Claude f
 
 Teammates get the bridge with their next pull. They don't need the plugin or Python.
 
-## Use
+## How to Use Skills After Installation
 
 Keep your skills in `.agents/skills/<name>/SKILL.md` and edit them only there. Claude Code picks up
 new, changed and deleted skills by itself.
@@ -74,7 +74,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .claude\hooks\agent-skills-b
 
 The `hooks` line must say `.claude/settings.json runs the bridge`.
 
-## Update
+## How to Update the Bridge
 
 ```sh
 claude plugin update agent-skills-bridge@agent-skills-bridge
@@ -83,7 +83,7 @@ claude plugin update agent-skills-bridge@agent-skills-bridge
 Then run the install command in the project again, and commit. The plugin has no version number:
 Claude Code takes the commit as its version, so an update always brings the newest commit.
 
-## Uninstall
+## How to Uninstall the Bridge
 
 **From a project.** In its top folder:
 
@@ -111,7 +111,7 @@ Claude Code takes the commit as its version, so an update always brings the newe
 /plugin marketplace remove agent-skills-bridge
 ```
 
-## More
+## Additional Documentation
 
 | Document | Content |
 |---|---|
@@ -119,7 +119,3 @@ Claude Code takes the commit as its version, so an update always brings the newe
 | [docs/manual-installation.md](docs/manual-installation.md) | Installation by hand, for a machine without Python |
 | [docs/testing.md](docs/testing.md) | What the tests cover, where they passed, and how to run them |
 | `.claude/hooks/agent-skills-bridge.md`, in an installed project | Everyday use, svn, worktrees, manual test, troubleshooting |
-
-## Licence
-
-[MIT](LICENSE)
