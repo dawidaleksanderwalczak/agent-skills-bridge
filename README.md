@@ -7,11 +7,13 @@ A Claude Code plugin that makes Claude Code load the Agent Skills in `.agents/sk
 Codex, GitHub Copilot, Cursor, JetBrains Junie and OpenCode load project skills from 
 `.agents/skills`. **Claude Code does not.** It only reads from `.claude/skills`
 ([anthropics/claude-code#31005](https://github.com/anthropics/claude-code/issues/31005) is still
-open). Without a bridge, a team keeps every skill twice.
+open).
 
-The plugin installs three Claude Code hooks in a project. They copy each skill from `.agents/skills`
-to `.claude/skills`, keep the copies current during a session, and stop Claude from editing a copy.
-`.agents/skills` stays the only source: the copies are read-only and ignored by git and svn.
+Without a bridge, teams must manage synchronization themselves, whether through manual copying, maintaining fragile symlinks (which often break across Windows and Git/SVN) or custom scripts.
+
+The plugin automatically synchronizes skills from `.agents/skills` into `.claude/skills`, keeping the generated copies up to date, read-only and excluded from version control. The `.agents/skills` directory remains the single source of truth.
+
+Under the hood, the plugin installs three Claude Code hooks that handle initial synchronization, keep skill copies current throughout a session, and prevent Claude Code from modifying the generated copies.
 
 | | Source, committed | Copy, generated | In Claude Code |
 |---|---|---|---|
