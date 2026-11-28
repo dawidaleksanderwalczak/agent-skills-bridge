@@ -55,9 +55,7 @@ The table below shows how a skill path in `.agents/skills` maps to its generated
    The installer adds the hooks to `.claude/settings.json` and the scripts to `.claude/hooks`, keeps
    your existing settings, and verifies the result. It commits nothing.
 
-3. **Commit** the files that the report lists, and start a new session.
-
-Teammates get the bridge with their next pull. They don't need the plugin or Python.
+3. **Optional — commit to share with teammates.** If you want others on the project to get the bridge automatically on their next pull, commit the files listed in the report. Start a new session afterward—teammates won't need the plugin or Python.
 
 ## How to Use Skills After Installation
 
