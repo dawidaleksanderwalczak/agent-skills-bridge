@@ -62,20 +62,6 @@ The table below shows how a skill path in `.agents/skills` maps to its generated
 Keep your skills in `.agents/skills/<name>/SKILL.md` and edit them only there. Claude Code picks up
 new, changed and deleted skills by itself.
 
-To check a project, in its top folder:
-
-```sh
-sh .claude/hooks/agent-skills-bridge.sh status
-```
-
-In cmd or PowerShell on Windows:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .claude\hooks\agent-skills-bridge.ps1 status
-```
-
-The `hooks` line must say `.claude/settings.json runs the bridge`.
-
 ## How to Update the Bridge
 
 ```sh
