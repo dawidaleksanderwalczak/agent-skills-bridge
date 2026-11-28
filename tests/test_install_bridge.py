@@ -1,5 +1,6 @@
 """Tests for the plugin and its installer skill: the plugin and the marketplace file, the skill
-folder, and the installer in throwaway projects.
+folder, and the installer in throwaway projects. The plugin's other skill, the uninstaller, has
+its tests in test_uninstall_bridge.py, which builds on this file.
 
 Run:  python3 tests/test_install_bridge.py          (Windows: py -3.11 tests\\test_install_bridge.py)
 
@@ -35,6 +36,7 @@ MARKETPLACE = REPO / ".claude-plugin" / "marketplace.json"
 PLUGIN = REPO / "plugins" / "agent-skills-bridge"
 MANIFEST = PLUGIN / ".claude-plugin" / "plugin.json"
 SKILL = PLUGIN / "skills" / "installing-agent-skills-bridge"
+REMOVING = PLUGIN / "skills" / "uninstalling-agent-skills-bridge"  # the plugin's other skill
 INSTALLER = SKILL / "scripts" / "install_bridge.py"
 KIT = SKILL / "assets" / "kit"
 
@@ -305,17 +307,18 @@ class Plugin(unittest.TestCase):
             self.assertNotIn('"email"', text, path.name)
             self.assertNotRegex(text, r"[\w.+-]+@[\w-]+\.\w", path.name)
 
-    def test_plugin_brings_the_one_skill_and_nothing_else(self):
+    def test_plugin_brings_its_two_skills_and_nothing_else(self):
         """No hooks, commands, agents, servers or programs: installing the plugin changes no session
-        until the user types the skill's name."""
-        expected = sorted([".claude-plugin/plugin.json", "README.md", *("skills/%s/%s" % (SKILL.name, name) for name in files_in(SKILL))])
+        until the user types the name of one of its skills."""
+        self.assertEqual(sorted(path.name for path in (PLUGIN / "skills").iterdir()), [SKILL.name, REMOVING.name])
+        expected = sorted([".claude-plugin/plugin.json", "README.md", *("skills/%s/%s" % (skill.name, name) for skill in (SKILL, REMOVING) for name in files_in(skill))])
         self.assertEqual(files_in(PLUGIN), expected)
         self.assertEqual(files_in(MARKETPLACE.parent), ["marketplace.json"])
         for key in ("skills", "commands", "agents", "hooks", "mcpServers", "lspServers", "outputStyles", "workflows", "experimental", "userConfig", "channels", "dependencies"):
             self.assertNotIn(key, self.manifest)
             self.assertNotIn(key, self.entry)
 
-    def test_readmes_give_the_install_line_and_the_command(self):
+    def test_readmes_give_the_install_line_and_the_commands(self):
         name = self.manifest["name"]
         repository = urllib.parse.urlsplit(self.manifest["repository"]).path.strip("/")
         for readme in (REPO / "README.md", PLUGIN / "README.md"):
@@ -323,7 +326,14 @@ class Plugin(unittest.TestCase):
             where = readme.relative_to(REPO).as_posix()
             self.assertIn("/plugin install %s --marketplace %s\n" % (name, repository), text, where)
             self.assertIn("/plugin install %s@%s\n" % (name, self.market["name"]), text, where)
-            self.assertIn("/%s:%s\n" % (name, SKILL.name), text, where)
+            for skill in (SKILL, REMOVING):
+                self.assertIn("/%s:%s\n" % (name, skill.name), text, where)
+
+    def test_readme_names_the_page_for_a_removal_by_hand(self):
+        """The uninstaller needs Python. The README leads to the page that needs none."""
+        page = REMOVING / "references" / "removing-by-hand.md"
+        self.assertIn("](%s)" % page.relative_to(REPO).as_posix(), (REPO / "README.md").read_text(encoding="utf-8"))
+        self.assertTrue(page.is_file())
 
     def test_claude_code_accepts_the_plugin(self):
         claude = shutil.which("claude")
@@ -338,7 +348,8 @@ class Plugin(unittest.TestCase):
             self.assertIn("Validation passed", out)
             self.assertNotIn("has no line that installs", out, "the README must hold the install line")
         if "Provides:" in out:  # Claude Code 2.1.326 and newer list what the plugin brings
-            self.assertIn("skills: %s:%s" % (self.manifest["name"], SKILL.name), out)
+            for skill in (SKILL, REMOVING):
+                self.assertIn("skills: %s:%s" % (self.manifest["name"], skill.name), out)
 
 
 class SkillFolder(unittest.TestCase):

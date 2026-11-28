@@ -28,7 +28,7 @@ version control and never committed. Nobody has to install or run anything.
 - [Troubleshooting](#troubleshooting): each message, its cause and the fix
 - [The hook command](#the-hook-command)
 - [Testing](#testing)
-- [Removing it](#removing-it)
+- [Removing it](#removing-it): the uninstaller skill, and the same by hand
 
 ## How it works
 
@@ -188,10 +188,11 @@ The bridge can only be as sure as these signs are:
 
 ## Install or update it
 
-The kit's repository holds a Claude Code plugin, `agent-skills-bridge`. Its one skill installs the
-kit. With the plugin added, type `/agent-skills-bridge:installing-agent-skills-bridge` in Claude
-Code, in the project. The repository's README says how to add the plugin. The skill's installer, a
-Python script:
+The kit's repository holds a Claude Code plugin, `agent-skills-bridge`, with two skills. One
+installs the kit, and the other takes it out again: see [Removing it](#removing-it). With the
+plugin added, type `/agent-skills-bridge:installing-agent-skills-bridge` in Claude Code, in the
+project. The repository's README says how to add the plugin. The skill's installer, a Python
+script:
 
 - copies the kit's files in the table above to `.claude/hooks`, and replaces them when the kit is
   newer;
@@ -753,12 +754,39 @@ a real Claude Code session on your own machine, follow the [manual test](#manual
 
 ## Removing it
 
-When Claude Code reads `.agents/skills` itself (watch #31005):
+Remove the bridge when Claude Code reads `.agents/skills` itself (watch #31005), or when the
+project no longer wants it. There is no hurry on that day: a Claude Code that loads both folders
+would just see each skill twice until the bridge is gone.
+
+**With the uninstaller skill.** The plugin that installed the kit removes it too. With the plugin
+added, type `/agent-skills-bridge:uninstalling-agent-skills-bridge` in Claude Code, in the project.
+The skill's uninstaller, a Python script:
+
+- takes the bridge's hook entries out of `.claude/settings.json`, and leaves your other settings
+  and hooks as they are;
+- deletes the copies and the records with the bridge's own `clean`, so a skill of your own stays,
+  also one that has taken the place of a copy;
+- deletes the `agent-skills-bridge.*` files, and `.claude/hooks/.gitattributes` and the anchor
+  where they are still the kit's;
+- in svn, schedules the deletions and takes the bridge's rule out of `svn:ignore`.
+
+It keeps every file it changes in a folder outside the project, checks its own work and commits
+nothing. Before it has changed anything, it stops at a `settings.json` that names the bridge and
+is no valid JSON, and at a link in the place of `.claude`. The `clean` that it runs is the
+plugin's copy of the bridge, never the script in the project.
+
+**Every checkout has its own copies.** They are in no repository, so a pull or an update that
+takes the kit away leaves them where they are, and Claude Code goes on loading them. Run the
+uninstaller in every checkout where a Claude Code session ran. It deletes the copies also where
+the kit is already gone.
+
+**By hand,** in this order:
 
 1. Delete the bridge's four hook entries.
 2. Run `sh .claude/hooks/agent-skills-bridge.sh clean`. In cmd or PowerShell on Windows, run
    `powershell -NoProfile -ExecutionPolicy Bypass -File .claude\hooks\agent-skills-bridge.ps1 clean`.
-3. Delete the `agent-skills-bridge.*` files. Delete `.claude/hooks/.gitattributes` unless other
-   scripts need it, and the anchor unless your own skills live in `.claude/skills`.
-
-Until then, a Claude Code that loads both folders would just see each skill twice.
+3. Delete the `agent-skills-bridge.*` files. Delete `.claude/hooks/.gitattributes` unless it holds
+   rules of your own or other shell scripts there need its rule, and the anchor unless it holds
+   rules of your own.
+4. In svn, use `svn delete` for these files, and take `*` out of `svn:ignore` on `.claude/skills`
+   if the folder stays.

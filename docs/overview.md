@@ -249,11 +249,12 @@ The skill `installing-agent-skills-bridge` does the adoption. It comes in a Clau
 `/agent-skills-bridge:installing-agent-skills-bridge` in a project; Claude never starts the skill by
 itself.
 
-The plugin only brings the installer to a machine. It holds the one skill, and no hook, command,
-agent or server, so adding it changes no session. The bridge itself stays in the project, in the
-project's own `.claude` folder: teammates get it with a pull and need no plugin. The plugin names
-no version, so Claude Code takes the commit as its version, and every commit on the default branch
-reaches the users who update.
+The plugin only brings the installer and the uninstaller to a machine. It holds these two skills,
+and no hook, command, agent or server, so adding it changes no session. The bridge itself stays in
+the project, in the project's own `.claude` folder: teammates get it with a pull and need no
+plugin. The plugin names no version, so Claude Code takes the commit as its version, and every
+commit on the default branch reaches the users who update. The second skill,
+`uninstalling-agent-skills-bridge`, takes the kit out of a project again: section 11 describes it.
 
 The skill's installer, `scripts/install_bridge.py`, is a Python script without dependencies. It
 takes the kit from the skill's own `assets/kit` folder and:
@@ -1020,6 +1021,82 @@ with nothing but the Python of Apple's command line tools is one. The report the
 `python too old` and names the installation by hand. And the review ran on Windows and Linux: no
 Mac was at hand, and no Python from 3.6 to 3.9 (see "Not run yet" in [testing.md](testing.md)).
 
+### The uninstaller skill (27 November 2026)
+
+Until this day a project lost the bridge by hand, in three steps from the README. The plugin's
+second skill, `uninstalling-agent-skills-bridge`, does it now (section 11). The kit's scripts did
+not change. The kit's documentation, the README and the plugin's texts name the skill.
+
+The uninstaller has its own tests, `tests/test_uninstall_bridge.py`. Most of them install the kit
+with the real installer, let the bridge make its copies, uninstall, and then compare the project
+with what it was before the installation, byte for byte. They cover:
+
+- a new git repository, a folder without version control, a folder name with a space and a letter
+  outside ASCII, a project in a folder below the top of the repository, and a linked worktree;
+- settings, hooks, ignore rules and skills of the project's own next to the kit: CRLF, tabs, a
+  byte order mark and a missing last line end come back as they were;
+- hook entries of an older kit inside a group of the project's own, entries in
+  `.claude/settings.local.json`, and a permission rule that names the bridge;
+- a kit that is committed: git shows the kit's files as deleted and nothing else, and the command
+  from the report stages exactly that, also from a project folder below the top of the repository;
+- what is left of a bridge that was removed by halves: copies without the kit, as after a pull,
+  hooks without scripts, scripts without hooks, and the test file of an older kit;
+- a skill of someone's own in the place of a copy, a copy that the bridge leaves alone, and a
+  folder with the mark of a copy that no record names: each stays and is named in the report;
+- the project's own scripts, with ones in their place that would leave a trace: none is started.
+  Programs named `git`, `svn`, `rm` and `find` in the project, with the project first on PATH:
+  none is started either;
+- a `settings.json` that cannot be read, a link in the place of `.claude` or of a file, a file
+  that cannot be deleted, and a `clean` that fails because a sync holds the lock: each stops the
+  run, and the project is as it was;
+- the rule in `.gitignore`: offered, left alone without the flag, put back with it;
+- svn: a kit that was scheduled and never committed leaves `svn status` empty, with copies and
+  without; a committed kit is scheduled for deletion and commits; `svn:ignore` loses `*` where
+  the folder stays, and keeps a value with rules of the project's own; a step that svn refuses
+  makes the run incomplete;
+- the hook commands that a running session still holds, run after the removal in `sh` and in
+  Windows PowerShell: they end with 0 and make no copy;
+- the skill folder against the Agent Skills specification, the descriptions of the two skills
+  against each other, and the code that the two scripts share.
+
+UNINSTALLER-RESULTS
+
+The installer and the uninstaller are each one file that stands alone, as a skill's script should
+be, so they hold the same code for finding a Python, finding and running a program and printing
+the report. A test compares that code, function by function, so the installer's tests of it hold
+for the uninstaller too.
+
+Defects that came out while the uninstaller was written and tested:
+
+| Finding | Fix |
+|---|---|
+| The report's commit step named `git add -- <paths>`. For a tracked file that is deleted, below a folder that a rule ignores, git stages the removal and still ends with status 1 and "paths are ignored" (checked). | The step names `git add -u --`, which stages what git tracks and says nothing. A test runs the command from the report and commits. |
+| The paths in that step came from `git status`, which names a path from the top of the repository. For a project in a folder below the top, the command then fails where the user types it, with "pathspec did not match any files" (checked). | The paths come from `git ls-files`, which names them from the project's folder. A test runs the command there. |
+| The first version made a read-only file writable to delete it. On Windows that mark is the only thing that keeps a file, and the installer does not write over such a file either. | A file that cannot be deleted stops the run, and everything is put back. |
+| A hook entry of an older kit starts the script without looking for it first. Once the script is gone, it fails in every session that was already running: with status 2 in dash and BusyBox, which Claude Code reads as the guard's refusal of every Write (checked: dash 2, BusyBox 2, bash 1, zsh 127). The report said that the hooks "do nothing". | Where such an entry went, the report's first next step is a new session, and it says why. The removal cannot change what a running session holds. |
+| In an svn working copy where no session had run, `.claude/skills` was empty: the installer gives git the anchor there, and svn only `svn:ignore`. The uninstaller left every empty folder alone, so that folder stayed scheduled, and `.claude` with it. | An empty `.claude/skills` that svn knows and whose `svn:ignore` is `*` alone is the installer's, and goes. Any other empty folder stays. |
+| When svn refused a step, the report listed the folders after it as deleted. | They are listed as kept, and the run ends as incomplete. |
+UNINSTALLER-REVIEW
+
+The skill's text was tried on fresh agents that had only `SKILL.md` and a throwaway project, with
+the placeholder for the skill's folder not filled in. Each ran the one command and read no other
+file:
+
+| Agent and shell | Project | What it did |
+|---|---|---|
+| Haiku, Windows PowerShell 5.1 | Kit committed, two skills copied, settings and a hook of its own | Reported the removal file by file and the next steps. Committed nothing. |
+| Sonnet, Git Bash | The same, with the rule in `.gitignore` that the installer had rewritten | Reported the removal and put the offer to the user as a question. It did not pass `--restore-gitignore` by itself. After a yes it ran the command again with the flag, and the file was as before the installation. |
+| Haiku, Git Bash, asked in words | `settings.json` with a comment in it, which is no JSON | Stopped at `blocked`, gave the message and the fix, and asked before it touched the file. After the user had repaired the file, it ran the command again and reported the removal. |
+| Opus, Windows PowerShell 5.1 | A project that never had the bridge | Said that nothing was found and nothing changed. |
+
+In every project the files were then compared with the commit before the installation: the
+project's own `settings.json` and `.gitignore` were the same, byte for byte.
+
+Not run: macOS; a live Claude Code session in which a user types the command; a Windows machine
+without Git Bash, where only the PowerShell twin's `clean` ran, in a test that tells the
+uninstaller which shell it found; BusyBox, whose image holds no Python; Python 3.12 and 3.13 on
+Windows.
+
 ### cmd.exe check (25 November 2026)
 
 A follow-up question was whether the kit also works for people who use cmd. The Claude Code program
@@ -1074,6 +1151,8 @@ Write and NotebookEdit, without a filter.
 - PowerShell 7. The test machine has none; `ASB_TEST_POWERSHELL=pwsh.exe` runs the suite with one.
 - A sync inside a OneDrive folder. The link test of the PowerShell twin was checked against the
   entries of a OneDrive folder, but nothing was copied there.
+- The uninstaller skill in a live session, on macOS, and on a Windows machine without Git Bash: see
+  "The uninstaller skill" above.
 - The terminal Claude Code CLI on the test machine (its login had expired), and cloud sessions.
 
 ---
@@ -1108,6 +1187,8 @@ Write and NotebookEdit, without a filter.
 | Each Write or NotebookEdit call starts the guard | A small delay per call. It is noticeable only on machines with slow process starts. | The guard exits at once outside `.claude/skills`. Claude Code's `if` filter can't help for these tools. |
 | The file watcher can't see changes, for example in WSL on `/mnt/c` | Changes made outside Claude arrive at the next session start. | Start a new session, or run `sync` and `/reload-skills`. |
 | Claude Code adds native `.agents/skills` support | Claude Code may list each skill twice until the bridge is removed. | Follow the exit plan in section 11 and watch #31005. |
+| The copies are in no repository | A pull that takes the kit away leaves the copies in every other checkout, and Claude Code goes on loading them there. No script is left in the project to delete them. | The uninstaller skill works where nothing but copies is left, and its report says to run it in each checkout. By hand, a copy is a folder in `.claude/skills` whose `.gitignore` begins with `# Copy of .agents/skills/`. |
+| The uninstaller needs Python 3.11 or newer, and the installing skill next to it | A machine whose only Python is older cannot run it. A skill folder that was copied out of the plugin alone cannot delete copies: it takes the bridge's script from the other skill. | The report says `python too old` or `blocked`, and names the removal by hand, a page that comes with the skill. Without copies in the project, the uninstaller needs no second skill. |
 | Half a copy that a kit from before 26 November 2026 left behind when its sync was killed | It is in no record and lacks the bridge's `.gitignore`. The bridge reports a conflict and does not copy that skill. | Delete the folder. The next hook makes the copy, and a kit of today puts it on record first. A whole copy without a record needs nothing: the bridge takes it back. |
 | The bridge tells its copy from a skill of your own by signs: its `.gitignore`, file times, the read-only mark of its files, and what git or svn track | Where a sign cannot be read, the bridge may take a skill of your own for an edited copy and replace it: without a working `git` on a branch that has the skill in both folders, and for root, who may write any file, where a file arrives with an older time or in the very second of the copy. | Section 8, "Who owns a copy", lists the cases. Skills that are committed can be restored from git. |
 | A folder that the bridge left to git keeps the copy's `.gitignore` | Git ignores new files in that folder. | Delete that `.gitignore` when you work in the folder. Back on the branch with the skill in `.agents/skills`, the bridge makes the copy again. |
@@ -1117,15 +1198,74 @@ Write and NotebookEdit, without a filter.
 
 ## 11. Exit plan
 
-When Claude Code reads `.agents/skills` itself:
+When Claude Code reads `.agents/skills` itself, or when a project no longer wants the bridge, the
+plugin's second skill takes the kit out. A user types
+`/agent-skills-bridge:uninstalling-agent-skills-bridge` in the project; Claude never starts the
+skill by itself. The skills themselves stay where they are, in `.agents/skills`.
 
-1. Delete the three hooks from `.claude/settings.json`.
+### The uninstaller skill
+
+The skill's uninstaller, `scripts/uninstall_bridge.py`, is a Python script without dependencies,
+built like the installer. It:
+
+1. plans the whole removal before it changes a file. A `settings.json` that names the bridge and
+   cannot be read as JSON, and a link in the place of `.claude`, stop it there;
+2. takes the bridge's hook entries out of `.claude/settings.json` and
+   `.claude/settings.local.json`, those of an older kit included, and leaves every other setting,
+   the indentation and the line endings as they are. A `settings.json` that held nothing else goes;
+3. deletes the kit's own files. `.claude/hooks/.gitattributes` and the anchor go only where they
+   are still the kit's: a file with rules of the project's own stays, and so does the rule that
+   keeps shell scripts LF while another shell script lies in `.claude/hooks`;
+4. has the bridge delete its copies and its records, with `clean`. Only the bridge can tell its
+   copy from a skill of someone's own (section 8, "Who owns a copy"), so the uninstaller does not
+   decide that a second time;
+5. tells svn about the deletions and takes `*` out of `svn:ignore`, deletes the folders that are
+   empty now, and checks that nothing of the bridge is left.
+
+Every file that it changes or deletes is copied to a folder outside the project first. A file that
+cannot be written or deleted, and a `clean` that fails, put every file back. A step that svn
+refuses after that leaves the run `incomplete`. The uninstaller never commits.
+
+Its answer is one JSON object on stdout, the report, and nothing on stderr. The report's `outcome`
+is the verdict, and the exit code says the same: `uninstalled` or `not installed` (0), `blocked`
+with nothing of the kit removed (1), `wrong arguments` (2), `incomplete` for changed but not
+complete (3), and `python too old` (4). The skill lets the agent call the bridge uninstalled on
+`uninstalled` and `not installed` only.
+
+Four decisions shape it:
+
+- **The project is input.** The uninstaller never starts the project's own
+  `agent-skills-bridge.sh`. A user may want the bridge out of a checkout for the very reason that
+  they do not trust its hooks, and a folder that someone names with `--project` may never have run
+  a hook on this machine. The `clean` that runs is the plugin's copy of the bridge, from the
+  installing skill next to the uninstaller. Both scripts of the bridge take the folder two levels
+  above their own for the project, so that copy lies in `.claude/agent-skills-bridge-uninstall/`
+  for the one run. It finds git and svn through a PATH that names no folder of the project.
+- **The hooks go before the copies.** The hook entries and the scripts are gone when `clean` runs.
+  A session that was running still holds the hooks, and from that moment they find no script and
+  do nothing, so no hook makes the copies again behind the uninstaller. Should `clean` fail, on a
+  file that a program holds open for example, the hook entries and the scripts are put back, and
+  the bridge works as before.
+- **Every checkout has its own copies.** They are in no repository. A pull that takes the kit away
+  leaves them, and Claude Code goes on loading them. So the uninstaller also works where nothing
+  but copies is left, and its report says to run it in each checkout.
+- **Consent for what consent changed.** Where the installer rewrote a rule in the project's
+  `.gitignore` (`--fix-gitignore`), the uninstaller names that in its report as an offer, and puts
+  the rule back only when it is started with `--restore-gitignore`. The skill passes that flag
+  after the user's yes only.
+
+A machine without Python 3.11 cannot run it. The removal by hand is a page of the skill,
+[removing-by-hand.md](../plugins/agent-skills-bridge/skills/uninstalling-agent-skills-bridge/references/removing-by-hand.md),
+and the report names it.
+
+### By hand
+
+1. Delete the bridge's four hook entries from `.claude/settings.json`.
 2. Run `sh .claude/hooks/agent-skills-bridge.sh clean` (in cmd or PowerShell, the `.ps1` with
    `clean`) to delete the copies and the bridge's records.
-3. Delete `.claude/hooks/agent-skills-bridge.*`. Delete `.claude/hooks/.gitattributes` unless other
-   scripts need it, and the anchor unless Claude-only skills live in `.claude/skills`.
-
-The skills themselves stay where they are, in `.agents/skills`.
+3. Delete `.claude/hooks/agent-skills-bridge.*`. Delete `.claude/hooks/.gitattributes` unless it
+   holds rules of the project's own or other shell scripts there need its rule, and the anchor
+   unless it holds rules of the project's own.
 
 ---
 

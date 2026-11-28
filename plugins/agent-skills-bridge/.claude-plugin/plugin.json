@@ -1,6 +1,6 @@
 {
   "name": "agent-skills-bridge",
-  "description": "Installs the agent-skills-bridge kit in a project, so that Claude Code loads the Agent Skills kept in .agents/skills. One skill, run only when you type its name.",
+  "description": "Installs the agent-skills-bridge kit in a project, so that Claude Code loads the Agent Skills kept in .agents/skills, and uninstalls it again. Two skills, each run only when you type its name.",
   "author": {
     "name": "Dawid Aleksander Walczak",
     "url": "https://github.com/dawidaleksanderwalczak"
@@ -8,5 +8,5 @@
   "homepage": "https://github.com/dawidaleksanderwalczak/agent-skills-bridge#readme",
   "repository": "https://github.com/dawidaleksanderwalczak/agent-skills-bridge",
   "license": "MIT",
-  "keywords": ["agent-skills", "skills", "agents", "hooks", "installer"]
+  "keywords": ["agent-skills", "skills", "agents", "hooks", "installer", "uninstaller"]
 }

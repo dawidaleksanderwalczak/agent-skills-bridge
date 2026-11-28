@@ -21,8 +21,8 @@ to `.claude/skills`, keep the copies current during a session, and stop Claude f
 ## Requirements
 
 - Claude Code 2.1.220 or newer, desktop app or CLI
-- Python 3.11 or newer on PATH, for the installer only. Any name will do: `python3`, `python`, `py`
-  or a versioned one such as `python3.12`
+- Python 3.11 or newer on PATH, for the installer and the uninstaller only. Any name will do:
+  `python3`, `python`, `py` or a versioned one such as `python3.12`
 - Windows (Git Bash or PowerShell), macOS or Linux; git or svn
 
 ## Install
@@ -85,24 +85,26 @@ Claude Code takes the commit as its version, so an update always brings the newe
 
 ## Uninstall
 
-**From a project.** In its top folder:
+**From a project.**
 
-1. Delete the four hook entries that name `agent-skills-bridge` from `.claude/settings.json`.
-2. Delete the copies. Your skills in `.agents/skills` stay.
+1. Open the project in Claude Code and type:
 
-   ```sh
-   sh .claude/hooks/agent-skills-bridge.sh clean
+   ```text
+   /agent-skills-bridge:uninstalling-agent-skills-bridge
    ```
 
-   In cmd or PowerShell on Windows:
+   The uninstaller takes the bridge's hooks out of `.claude/settings.json`, and deletes the scripts
+   in `.claude/hooks`, the copies in `.claude/skills` and the bridge's records. Your other settings
+   and hooks, your own skills and `.agents/skills` stay. It verifies the result and commits nothing.
 
-   ```powershell
-   powershell -NoProfile -ExecutionPolicy Bypass -File .claude\hooks\agent-skills-bridge.ps1 clean
-   ```
+2. **Commit** the removal that the report lists, and start a new session.
 
-3. Delete `.claude/hooks/agent-skills-bridge.*`. Delete `.claude/hooks/.gitattributes` and
-   `.claude/skills/.gitignore` too, unless other scripts or Claude-only skills of your own need them.
-4. Commit.
+3. Type the command in every other checkout where a Claude Code session ran, a teammate's
+   included. The copies are in no repository, so a pull removes none of them. The uninstaller
+   deletes them also where the kit is already gone.
+
+On a machine without Python, remove the bridge by hand:
+[removing-by-hand.md](plugins/agent-skills-bridge/skills/uninstalling-agent-skills-bridge/references/removing-by-hand.md).
 
 **From your machine.** This changes no project.
 
@@ -117,6 +119,7 @@ Claude Code takes the commit as its version, so an update always brings the newe
 |---|---|
 | [docs/overview.md](docs/overview.md) | Design, safety properties, support matrix, alternatives, risks |
 | [docs/manual-installation.md](docs/manual-installation.md) | Installation by hand, for a machine without Python |
+| [removing-by-hand.md](plugins/agent-skills-bridge/skills/uninstalling-agent-skills-bridge/references/removing-by-hand.md) | Removal by hand, for a machine without Python |
 | [docs/testing.md](docs/testing.md) | What the tests cover, where they passed, and how to run them |
 | `.claude/hooks/agent-skills-bridge.md`, in an installed project | Everyday use, svn, worktrees, manual test, troubleshooting |
 

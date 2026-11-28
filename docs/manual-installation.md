@@ -88,3 +88,9 @@ of svn with `svn:ignore`, and keep the shell script LF.
 Pull your clone, and run the copy commands again. They replace the three `agent-skills-bridge.*`
 files and leave the project's other files alone. Then compare the kit's `settings.json` with the
 bridge's entries in yours, and copy any command string that changed.
+
+## Remove by hand
+
+The [uninstaller skill](../README.md#uninstall) does the removal. Without Python, follow
+[removing-by-hand.md](../plugins/agent-skills-bridge/skills/uninstalling-agent-skills-bridge/references/removing-by-hand.md):
+it comes with that skill, and has the steps for git and for svn.
